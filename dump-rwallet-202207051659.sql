@@ -18,18 +18,6 @@ SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
-DROP DATABASE rwallet;
---
--- TOC entry 3337 (class 1262 OID 16516)
--- Name: rwallet; Type: DATABASE; Schema: -; Owner: postgres
---
-
-CREATE DATABASE rwallet WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'Indonesian_Indonesia.1252';
-
-
-ALTER DATABASE rwallet OWNER TO postgres;
-
-\connect rwallet
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -41,16 +29,6 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
-
---
--- TOC entry 3 (class 2615 OID 2200)
--- Name: public; Type: SCHEMA; Schema: -; Owner: postgres
---
-
-CREATE SCHEMA public;
-
-
-ALTER SCHEMA public OWNER TO postgres;
 
 --
 -- TOC entry 3338 (class 0 OID 0)
@@ -197,11 +175,11 @@ ALTER TABLE public.users ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 --
 
 COPY public.profile (id, fullname, balance, picture, user_id, phone_number) FROM stdin;
-1	Refaldy Bagas Anggana	Rp100.000,00	http://blablabla	1	\N
-3	Christiano Ronaldo	Rp80.000,00	http://wkwkwk	3	\N
-5	Christiano Ronaldo	Rp1.000,00	http://www.wkwkw.com	3	08123456789
-4	Vinsmoke Sanji	Rp1.000,00	http://hahahah	4	089765433678
-6	Christiano Ronaldo	Rp10.000,00	http://www.wkwkw.com	3	08223456789
+1	Refaldy Bagas Anggana	100000.00	http://blablabla	1	\N
+3	Christiano Ronaldo	80000.00	http://wkwkwk	3	\N
+5	Christiano Ronaldo	1000.00	http://www.wkwkw.com	3	08123456789
+4	Vinsmoke Sanji	1000.00	http://hahahah	4	089765433678
+6	Christiano Ronaldo	10000.00	http://www.wkwkw.com	3	08223456789
 \.
 
 
@@ -212,20 +190,20 @@ COPY public.profile (id, fullname, balance, picture, user_id, phone_number) FROM
 --
 
 COPY public.transaction (id, amount, recipient_id, sender_id, notes, "time", type_id) FROM stdin;
-1	Rp120.000,00	1	1	hallo	2022-06-20 00:00:00	1
-11	Rp10.000,00	2	2	hhhh	2022-04-03 00:00:00	2
-14	Rp10.000,00	3	3	tes	2022-01-01 00:00:00	3
-18	Rp2.000,00	3	3	tes	2022-01-01 00:00:00	3
-19	Rp2.000,00	3	3	tes	2022-01-01 00:00:00	3
-22	Rp2.000,00	3	3	tes	2022-01-01 05:00:00	3
-23	Rp12,00	3	3	tes	2022-11-30 00:00:00	3
-24	Rp12,00	3	3	tes	2022-11-30 00:00:00	3
-25	Rp1.000,00	3	3	tes	2022-11-30 00:00:00	3
-26	Rp1.000,00	3	3	tes	2022-11-30 00:00:00	3
-27	Rp1.000,00	3	3	tes	2022-11-30 00:00:00	3
-28	Rp100,00	3	3	tes	2022-11-30 00:00:00	3
-20	Rp75.000,00	7	7	update brow	2022-07-25 00:00:00	7
-29	Rp10.000,00	3	3	tes	2022-11-30 00:00:00	3
+1	120000.00	1	1	hallo	2022-06-20 00:00:00	1
+11	10000.00	2	2	hhhh	2022-04-03 00:00:00	2
+14	10000.00	3	3	tes	2022-01-01 00:00:00	3
+18	2000.00	3	3	tes	2022-01-01 00:00:00	3
+19	2000.00	3	3	tes	2022-01-01 00:00:00	3
+22	2000.00	3	3	tes	2022-01-01 05:00:00	3
+23	12.00	3	3	tes	2022-11-30 00:00:00	3
+24	12.00	3	3	tes	2022-11-30 00:00:00	3
+25	1000.00	3	3	tes	2022-11-30 00:00:00	3
+26	1000.00	3	3	tes	2022-11-30 00:00:00	3
+27	1000.00	3	3	tes	2022-11-30 00:00:00	3
+28	100.00	3	3	tes	2022-11-30 00:00:00	3
+20	75000.00	7	7	update brow	2022-07-25 00:00:00	7
+29	10000.00	3	3	tes	2022-11-30 00:00:00	3
 \.
 
 
