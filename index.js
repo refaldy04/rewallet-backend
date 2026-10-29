@@ -39,6 +39,6 @@ app.use('*', (req, res) => {
   });
 });
 
-app.listen(3334, () => {
-  console.log(`App is running on port 3334`);
+app.listen(process.env.PORT || 3334, () => {
+  console.log(`App is running on port ${process.env.PORT || 3334}`);
 });

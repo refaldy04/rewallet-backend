@@ -48,6 +48,16 @@ not fix vulnerabilities in application dependencies.
 
 ### API usage
 
+Registration and PIN setup are separate steps: `/auth/register` creates an
+account, then `/auth/createPin` sets its PIN. Before using this flow with a
+database whose `users.pin` column is `NOT NULL`, run
+`migrations/001_allow_pending_user_pin.sql` against that database (for example,
+in its SQL editor, or run `npm run db:migrate:pin` from the repository root).
+The command reads `DATABASE_URL` from `.env` or the terminal environment
+using the same PostgreSQL driver as the app. It preserves existing PINs and allows new accounts to
+have a `NULL` PIN until setup is complete. Deploying the app to Vercel does
+not automatically run this migration.
+
 1. Install Postman and open it
 2. click environment in the sidebar
 3. create new environment
