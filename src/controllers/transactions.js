@@ -38,7 +38,6 @@ exports.editTransaction = (req, res) => {
   const { id } = req.params;
   transactionModels.editTransaction(id, req.body, (err, result) => {
     if (err) {
-      console.log(err);
       return errorResponse(err, res);
     } else {
       return response(res, 'Edit transaction successfully', result[0]);

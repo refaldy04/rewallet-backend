@@ -1,138 +1,29 @@
-const db = require('../helpers/db')
+const db = require('../helpers/db');
+const { httpError } = require('../helpers/security');
 
-exports.getAllProfile = (id, limit, search, offset, sortBy, cb) => {
-  db.query(`SELECT * FROM profile WHERE user_id != $2 AND fullname LIKE '%${search}%' ORDER BY fullname ${sortBy} LIMIT $1 OFFSET ${offset}`, [limit, id], (err, res) => {
-    console.log('ini dari modal', err)
-    cb(res.rows)
-  })
-}
+exports.getAllProfile = (id, limit, search, offset, sort, cb, privateFields = false) => {
+  const columns = privateFields ? '*' : 'id, user_id, fullname, picture';
+  const direction = sort === 'DESC' ? 'DESC' : 'ASC';
+  db.query(`SELECT ${columns} FROM public.profile WHERE user_id <> $1 AND fullname ILIKE $2 ORDER BY fullname ${direction} LIMIT $3 OFFSET $4`, [id, `%${search}%`, limit, offset], (err, result) => cb(err, result?.rows));
+};
 
-exports.countAllProfile = (id, keyword, cb) => {
-  console.log('ini dari modal count', keyword)
-  db.query(`SELECT * FROM profile WHERE user_id != ${id} AND fullname LIKE '%${keyword}%'`, (err, res) => {
-    cb(err, res.rowCount)
-  })
-}
-
-exports.getProfileById = (id, cb) => {
-  db.query('SELECT * FROM profile WHERE id=$1', [id], (err, res) => {
-    cb(err, res)
-  })
-}
-
-exports.getProfileByUserId = (id, cb) => {
-  console.log('ini id hrusny ada', id)
-  db.query(`SELECT * FROM profile WHERE user_id=$1`, [id], (err, res) => {
-    cb(err, res)
-  })
-}
+exports.countAllProfile = (id, search, cb) => db.query('SELECT count(*)::integer AS count FROM public.profile WHERE user_id <> $1 AND fullname ILIKE $2', [id, `%${search}%`], (err, result) => cb(err, result?.rows[0].count));
+exports.getProfileById = (id, cb) => db.query('SELECT * FROM public.profile WHERE id=$1', [id], cb);
+exports.getProfileByUserId = (id, cb) => db.query('SELECT * FROM public.profile WHERE user_id=$1', [id], cb);
 
 exports.createProfile = (data, cb) => {
-  const query = 'INSERT INTO profile(fullname, balance, picture, user_id, phone_number) VALUES($1, $2, $3, $4, $5) RETURNING *'
-  const values = [data.fullname, data.balance, data.picture, data.user_id, data.phone_number]
-  db.query(query, values, (err, res) => {
-    if (err) {
-      cb(err)
-    } else {
-      cb(err, res.rows)
-    }
-  })
+  db.query('INSERT INTO public.profile(fullname, picture, user_id, phone_number) VALUES($1, $2, $3, $4) RETURNING *', [data.fullname, data.picture, data.user_id, data.phone_number], (err, result) => cb(err, result?.rows));
+};
+
+function edit(column, id, data, picture, cb) {
+  // Identity and balance are never writable through profile editing.
+  const entries = Object.entries({ fullname: data.fullname, phone_number: data.phone_number, picture: picture ?? undefined }).filter(([, value]) => value !== undefined);
+  if (!entries.length) return cb(httpError(400, 'No editable profile fields supplied'));
+  const assignments = entries.map(([key], index) => `${key}=$${index + 2}`).join(', ');
+  db.query(`UPDATE public.profile SET ${assignments} WHERE ${column}=$1 RETURNING *`, [id, ...entries.map(([, value]) => value)], (err, result) => cb(err, result?.rows));
 }
 
-exports.createProfileAfterRegister = (data, cb) => {
-  const query = 'INSERT INTO profile(user_id) VALUES($1) RETURNING *'
-  const values = [data]
-  db.query(query, values, (err, res) => {
-    if (err) {
-      cb(err)
-    } else {
-      cb(err, res.rows)
-    }
-  })
-}
-
-exports.editProfile = (id, data, picture, cb) => {
-  val = [id]
-  const filtered = {}
-  const obj = {
-    picture,
-    fullname: data.fullname,
-    balance: data.balance,
-    user_id: data.user_id,
-    phone_number: data.phone_number,
-  }
-
-  for (x in obj) {
-    if (obj[x] !== null) {
-      if (obj[x] !== undefined) {
-        filtered[x] = obj[x]
-        val.push(obj[x])
-      }
-    }
-  }
-
-  const key = Object.keys(filtered)
-  const finalResult = key.map((val, index) => `${val}=$${index + 2}`)
-  console.log(finalResult)
-  console.log(val)
-
-  const query = `UPDATE profile SET ${finalResult}  WHERE id=$1 or user_id=$1 RETURNING *`
-  db.query(query, val, (err, res) => {
-    if (res) {
-      // console.log(res);
-      cb(err, res.rows)
-    } else {
-      console.log(err)
-      cb(err)
-    }
-  })
-}
-
-exports.increaseBalance = (val, data, cb) => {
-  const query = `UPDATE profile SET balance=balance + $1 WHERE user_id=$2 RETURNING *`
-  const values = [val, data]
-  db.query(query, values, (err, res) => {
-    // console.log(res.rows);
-    if (err) {
-      cb(err)
-    } else {
-      cb(err, res.rows)
-    }
-  })
-}
-
-exports.decreaseBalance = (val, data, cb) => {
-  const query = `UPDATE profile SET balance=balance - $1 WHERE user_id=$2 RETURNING *`
-  const values = [val, data]
-  db.query(query, values, (err, res) => {
-    // console.log(res.rows);
-    if (err) {
-      cb(err)
-    } else {
-      cb(err, res.rows)
-    }
-  })
-}
-
-exports.changePhoneNumber = (id, data, cb) => {
-  val = [id, data.phonenumber]
-  const query = `UPDATE profile SET phone_number=$2 WHERE user_id=$1 RETURNING phone_number`
-  db.query(query, val, (err, res) => {
-    if (res) {
-      // console.log(res);
-      cb(err, res.rows[0])
-    } else {
-      console.log(err)
-      cb(err)
-    }
-  })
-}
-
-exports.deleteProfile = (id, cb) => {
-  const query = 'DELETE FROM profile WHERE id=$1 RETURNING *'
-  const value = [id]
-  db.query(query, value, (err, res) => {
-    // console.log(res);
-    cb(res.rows)
-  })
-}
+exports.editProfile = (id, data, picture, cb) => edit('id', id, data, picture, cb);
+exports.editOwnProfile = (userId, data, picture, cb) => edit('user_id', userId, data, picture, cb);
+exports.changePhoneNumber = (id, data, cb) => db.query('UPDATE public.profile SET phone_number=$2 WHERE user_id=$1 RETURNING phone_number', [id, data.phonenumber], (err, result) => cb(err, result?.rows[0]));
+exports.deleteProfile = (id, cb) => db.query('DELETE FROM public.profile WHERE id=$1 RETURNING *', [id], (err, result) => cb(err, result?.rows[0]));

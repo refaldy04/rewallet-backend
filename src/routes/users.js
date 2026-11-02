@@ -1,24 +1,15 @@
 const users = require('express').Router();
-const usersController = require('../controllers/users');
+const controller = require('../controllers/users');
 const { body } = require('express-validator');
-const bcrypt = require('bcrypt');
+const { asyncHandler } = require('../helpers/security');
 
-const userValidation = [
-  body('email').isEmail().withMessage('Email format invalid'),
-  body('username').isLength({ min: 4 }).withMessage('Username length minimal 4 character'),
-  body('password')
-    .isLength({ min: 8 })
-    .withMessage('password length min 8 character')
-    .customSanitizer(async (val) => {
-      const hash = await bcrypt.hash(val, 10);
-      return hash;
-    }),
-];
-
-users.get('/user', body('limit').toInt(), body('page').toInt(), usersController.getAllUsers);
-users.get('/user/:id', usersController.getUserById);
-users.post('/user', ...userValidation, usersController.creatUsers);
-users.patch('/user/:id', ...userValidation, usersController.editUser);
-users.delete('/user/:id', usersController.deleteUser);
-
+const validation = (optional) => {
+  const field = (name) => optional ? body(name).optional() : body(name);
+  return [field('email').isEmail(), field('username').isString().isLength({ min: 4, max: 255 }), field('password').isString().bail().isLength({ min: 8 }).bail().custom((value) => Buffer.byteLength(value, 'utf8') <= 72)];
+};
+users.get('/user', asyncHandler(controller.getAllUsers));
+users.get('/user/:id', asyncHandler(controller.getUserById));
+users.post('/user', ...validation(false), asyncHandler(controller.creatUsers));
+users.patch('/user/:id', ...validation(true), asyncHandler(controller.editUser));
+users.delete('/user/:id', asyncHandler(controller.deleteUser));
 module.exports = users;

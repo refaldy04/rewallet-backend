@@ -1,26 +1,27 @@
 const jwt = require('jsonwebtoken');
-const responese = require('../helpers/standardResponse');
+const users = require('../models/users');
+const response = require('../helpers/standardResponse');
+const { jwtSecret, credentialVersion } = require('../helpers/security');
 
-const auth = (req, res, next) => {
-  // console.log(req.headers.authorization);
-  if (req.headers.authorization) {
-    const auth = req.headers.authorization;
-    // console.log(auth);
-    const prefix = 'Bearer';
-    if (auth.startsWith(prefix)) {
-      const token = auth.slice(prefix.length + 1, auth.length);
-      try {
-        const result = jwt.verify(token, process.env.APP_SECRET || 'mYF1rStb4ck3nd');
-        req.authUser = result;
-        // console.log(result);
-        next();
-      } catch (e) {
-        return responese(res, 'Token Expired', null, null, 401);
-      }
+module.exports = (req, res, next) => {
+  const match = /^Bearer ([^\s]+)$/i.exec(req.headers.authorization || '');
+  if (!match) return response(res, 'Authentication required', null, null, 401);
+  let claims;
+  try {
+    claims = jwt.verify(match[1], jwtSecret(), { algorithms: ['HS256'] });
+    if (!Number.isSafeInteger(claims.id) || claims.id <= 0 || !Number.isFinite(claims.exp)) {
+      return response(res, 'Invalid token', null, null, 401);
     }
-  } else {
-    return responese(res, 'You should to login first', null, null, 401);
+  } catch {
+    return response(res, 'Invalid or expired token', null, null, 401);
   }
+  users.getCredentialsById(claims.id, (err, result) => {
+    if (err) return next(err);
+    const user = result.rows[0];
+    if (!user || claims.credentialVersion !== credentialVersion(user.password)) {
+      return response(res, 'Invalid or expired token', null, null, 401);
+    }
+    req.authUser = { id: user.id };
+    next();
+  });
 };
-
-module.exports = auth;

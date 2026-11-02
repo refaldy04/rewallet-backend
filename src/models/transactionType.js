@@ -32,7 +32,6 @@ exports.editTransactionType = (id, data, cb) => {
       // console.log(res);
       cb(err, res.rows);
     } else {
-      console.log(err);
       cb(err);
     }
   });

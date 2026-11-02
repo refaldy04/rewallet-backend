@@ -1,77 +1,38 @@
-const response = require('../helpers/standardResponse')
-const usersModels = require('../models/users')
-const { validationResult } = require('express-validator')
-const errorResponse = require('../helpers/errorResponse')
+const { promisify } = require('node:util');
+const bcrypt = require('bcrypt');
+const { validationResult } = require('express-validator');
+const response = require('../helpers/standardResponse');
+const users = require('../models/users');
+const { validationErrors, httpError } = require('../helpers/security');
 
-const { LIMIT_DATA } = process.env
+exports.getAllUsers = async (req, res) => {
+  const { search = '', sortBy = 'id' } = req.query;
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const result = await promisify(users.getAllUsers)(search, limit, (page - 1) * limit, sortBy, req.query.sort === '1' ? 'DESC' : 'ASC');
+  const totalData = await promisify(users.countAllUsers)(search);
+  return response(res, 'List all users', result, { totalData, totalPage: Math.ceil(totalData / limit), currentPage: page });
+};
+exports.getUserById = async (req, res) => {
+  const result = await promisify(users.getUserById)(req.params.id);
+  if (!result.rows[0]) throw httpError(404, 'User not found');
+  return response(res, 'Detail user', result.rows[0]);
+};
 
-exports.getAllUsers = (req, res) => {
-  const { search = '', limit = parseInt(LIMIT_DATA), page = 1, sortBy = 'id', sort = 0 } = req.query
-  const offset = (page - 1) * limit
-
-  if (sort < 0 || sort > 1) {
-    return response(res, 'Please input between 0 or 1 for sorts key | 0 for ASC and 1 for DESC')
-  }
-  let sortVal = sort < 1 ? 'ASC' : 'DESC'
-  // console.log(sort);
-  usersModels.getAllUsers(search, limit, offset, sortBy, sortVal, (err, result) => {
-    if (result.length < 1) {
-      return res.redirect('/404')
-    }
-    const pageInfo = {}
-    usersModels.countAllUsers(search, (err, totalData) => {
-      pageInfo.totalData = totalData
-      pageInfo.totalPage = Math.ceil(totalData / limit)
-      pageInfo.currentPage = parseInt(page)
-      pageInfo.nextPage = pageInfo.currentPage < pageInfo.totalPage ? pageInfo.currentPage + 1 : null
-      pageInfo.prevPage = pageInfo.currentPage > 1 ? pageInfo.currentPage - 1 : null
-      return response(res, 'List all users', result, pageInfo)
-    })
-  })
+async function save(req, res, create) {
+  const validation = validationResult(req);
+  if (!validation.isEmpty()) return response(res, 'Invalid input', validationErrors(validation), null, 400);
+  if (Object.keys(req.body).some((field) => !['email', 'username', 'password'].includes(field))) throw httpError(400, 'Only email, username and password may be edited');
+  const data = { ...req.body };
+  if (data.password !== undefined) data.password = await bcrypt.hash(data.password, 12);
+  const result = create ? (await promisify(users.createUsers)(data))[0] : await promisify(users.updateUser)(req.params.id, data);
+  if (!result) throw httpError(404, 'User not found');
+  return response(res, create ? 'User created' : 'User updated', result, null, create ? 201 : 200);
 }
-
-exports.getUserById = (req, res) => {
-  const { id } = req.params
-  console.log('dari get user by id', id)
-  usersModels.getUserById(id, (err, result) => {
-    if (result.rows.length > 0) {
-      return response(res, 'Detail user', result.rows[0])
-    } else {
-      return res.redirect('/404')
-    }
-  })
-}
-
-exports.creatUsers = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  usersModels.createUsers(req.body, (err, result) => {
-    if (err) {
-      return errorResponse(err, res)
-    } else {
-      return response(res, 'Create user successfully', result[0])
-    }
-  })
-}
-
-exports.editUser = (req, res) => {
-  const { id } = req.params
-  usersModels.updateUser(id, req.body, (err, result) => {
-    if (err) {
-      return errorResponse(err, res)
-    } else {
-      return response(res, 'Edit user successfully', result[0])
-    }
-  })
-}
-
-exports.deleteUser = (req, res) => {
-  const { id } = req.params
-  usersModels.deleteUser(id, (result) => {
-    return response(res, 'User deleted', result[0])
-  })
-}
+exports.creatUsers = (req, res) => save(req, res, true);
+exports.editUser = (req, res) => save(req, res, false);
+exports.deleteUser = async (req, res) => {
+  const user = await promisify(users.deleteUser)(req.params.id);
+  if (!user) throw httpError(404, 'User not found');
+  return response(res, 'User deleted', user);
+};

@@ -37,8 +37,12 @@ npm start
 
 Configure the database, JWT secret and Cloudinary environment variables
 before using the corresponding endpoints. The local server listens on port 3334.
-Run `npm test` for the Cloudinary upload adapter checks. These use a mocked
-SDK; database and live Cloudinary integration still need separate testing.
+Run `npm test` for the Cloudinary adapter and security regression checks.
+Security integration tests start a disposable local PostgreSQL cluster when
+`initdb` and `pg_ctl` are on PATH, and otherwise report a skip. They use the
+application table definitions from `schema.sql`, synthetic data and real HTTP
+requests; they never connect to the application's database. Cloudinary tests
+use a mocked SDK; live Cloudinary integration still needs separate testing.
 
 For Vercel deployment, use Node.js 24.x in the project's Node.js Version
 setting and redeploy. The `engines.node` field in `package.json` also
@@ -49,14 +53,70 @@ not fix vulnerabilities in application dependencies.
 ### API usage
 
 Registration and PIN setup are separate steps: `/auth/register` creates an
-account, then `/auth/createPin` sets its PIN. Before using this flow with a
-database whose `users.pin` column is `NOT NULL`, run
-`migrations/001_allow_pending_user_pin.sql` against that database (for example,
-in its SQL editor, or run `npm run db:migrate:pin` from the repository root).
-The command reads `DATABASE_URL` from `.env` or the terminal environment
-using the same PostgreSQL driver as the app. It preserves existing PINs and allows new accounts to
-have a `NULL` PIN until setup is complete. Deploying the app to Vercel does
-not automatically run this migration.
+account and profile atomically. Log in at `/auth/login`, then send the returned
+Bearer token with `/auth/createPin`. PIN setup always uses the authenticated
+account; the old email-based PIN setup is no longer supported. Submit PINs as
+six-character strings so leading zeros are preserved.
+
+### Security configuration and API changes
+
+- `APP_SECRET` is mandatory; the server refuses to start without it. Use a
+  randomly generated secret of at least 32 bytes and rotate any previously used
+  development secret. JWTs use HS256, expire after one hour and are invalidated
+  after password changes. Previous tokens require a fresh login.
+- `ADMIN_USER_IDS` is an operator-managed comma-separated list of existing
+  `public.users.id` values. For example, `ADMIN_USER_IDS=12,34` authorizes those
+  two users. No configured IDs means all admin access is denied. The schema has
+  no application role column; request fields and JWT role claims cannot grant
+  admin access. Every `/admin` router requires authentication and this check.
+- `PATCH /profile` accepts only `fullname`, `phone_number` and a multipart
+  `picture` upload. Other fields are rejected. Updates use exactly
+  `profile.user_id = authenticated_user_id`; admin updates by profile ID use
+  exactly `profile.id`. Neither editing path changes balance or ownership.
+- `/allProfile` is a recipient directory exposing only `id`, `user_id`,
+  `fullname` and `picture`. Balances and phone numbers remain private.
+- `PATCH /resetPassword/:id` now requires a Bearer token, the caller's own ID,
+  `password` (current password) and `newpassword`. `/changePassword` has the same
+  credential requirements without the ID parameter. This closes the old public
+  ID-only reset; it is **not an unauthenticated forgotten-password recovery
+  flow**. Email recovery requires a separate delivery service and an expiring,
+  single-use token flow. `/checkEmail` returns a generic response without IDs.
+- Login returns `pinSet` instead of `pin`. PINs, password hashes and PIN hashes
+  are never included in API results or validation errors. Request/user/SQL
+  logging that could expose credentials has been removed.
+- PIN setup and changes write bcrypt hashes to `users.pin_hash` and clear
+  `users.pin`. Five wrong PIN attempts lock the account's PIN verification for
+  15 minutes (HTTP 429 with `Retry-After`). `/checkPin`, `/changePin` and the
+  transfer PIN check share persistent counters and a database row lock.
+  `/changePin` requires both `pin` and `newpin` as six-digit strings.
+- Legacy `/topup` and `/transfer` financial writes return HTTP 503 while the
+  atomic wallet/payment service remains unimplemented, as required by
+  [the wallet migration prerequisites](migrations/README.md). The old top up
+  endpoint accepted arbitrary credits without payment verification.
+
+The same auth endpoints remain mounted both under `/auth` and at the root.
+Reauthentication follows the
+[OWASP authentication guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
+
+### Existing PIN migration
+
+The root `schema.sql` already defines nullable `users.pin`, `pin_hash`,
+`pin_failed_attempts` and `pin_locked_until`. For an older database, first
+follow the preflight and preparation steps in [migrations/README.md](migrations/README.md)
+through migration 002; do not run wallet cutover 003 just for PIN support.
+
+With application traffic stopped, run:
+
+```sh
+npm run db:migrate:pin
+```
+
+This command uses `DATABASE_URL` from the environment or `.env`, hashes existing
+six-digit PINs with bcrypt and erases their plaintext values. It is resumable
+and safe to repeat. Existing hash/counter/lock state is preserved. Invalid
+legacy PINs stop the migration for review and account recovery; they are never
+printed. A successful legacy PIN verification also upgrades that account if
+migration has not yet run. Deployment does not automatically run this command.
 
 1. Install Postman and open it
 2. click environment in the sidebar

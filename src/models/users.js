@@ -1,135 +1,55 @@
-const db = require('../helpers/db')
+const db = require('../helpers/db');
+const { httpError } = require('../helpers/security');
 
-const { LIMIT_DATA } = process.env
+const publicColumns = 'id, email, username';
+const credentials = 'id, email, username, password, pin, pin_hash';
 
-exports.getAllUsers = (keyword, limit = parseInt(LIMIT_DATA), offset = 0, sortBy, sort, cb) => {
-  // console.log(sortBy);
-  db.query(`SELECT * FROM users WHERE email LIKE '%${keyword}%' ORDER BY ${sortBy} ${sort} LIMIT $1 OFFSET $2`, [limit, offset], (err, res) => {
-    // console.log(res);
-    cb(err, res.rows)
-  })
-}
+exports.getAllUsers = (keyword, limit, offset, sortBy, sort, cb) => {
+  const column = ['id', 'email', 'username'].includes(sortBy) ? sortBy : 'id';
+  const direction = sort === 'DESC' ? 'DESC' : 'ASC';
+  db.query(`SELECT ${publicColumns} FROM public.users WHERE email ILIKE $1 ORDER BY ${column} ${direction} LIMIT $2 OFFSET $3`, [`%${keyword}%`, limit, offset], (err, result) => cb(err, result?.rows));
+};
 
-exports.getUserById = (id, cb) => {
-  db.query('SELECT * FROM users WHERE id=$1', [id], (err, res) => {
-    // console.log(res.rows);
-    // console.log(err);
-    cb(err, res)
-  })
-}
-
-exports.getUserByEmail = (email, cb) => {
-  console.log(email)
-  db.query('SELECT * FROM users WHERE email=$1 ', [email], (err, res) => {
-    console.log(res.rows)
-    cb(err, res)
-  })
-}
+exports.getUserById = (id, cb) => db.query(`SELECT ${publicColumns} FROM public.users WHERE id=$1`, [id], cb);
+exports.getCredentialsById = (id, cb) => db.query(`SELECT ${credentials} FROM public.users WHERE id=$1`, [id], cb);
+exports.getCredentialsByEmail = (email, cb) => db.query(`SELECT ${credentials} FROM public.users WHERE email=$1`, [email], cb);
 
 exports.countAllUsers = (keyword, cb) => {
-  db.query(`SELECT * FROM users WHERE email LIKE '%${keyword}%'`, (err, res) => {
-    cb(err, res.rowCount)
-  })
-}
+  db.query('SELECT count(*)::integer AS count FROM public.users WHERE email ILIKE $1', [`%${keyword}%`], (err, result) => cb(err, result?.rows[0].count));
+};
 
 exports.createUsers = (data, cb) => {
-  const query = 'INSERT INTO users(email, password, username, pin) VALUES($1, $2, $3, $4) RETURNING *'
-  const value = [data.email, data.password, data.username, data.pin]
-  db.query(query, value, (err, res) => {
-    if (res) {
-      // console.log(res);
-      cb(err, res.rows)
-    } else {
-      console.log(err)
-      cb(err)
-    }
-  })
-}
+  // PINs can only be set through the authenticated PIN service.
+  db.query(`INSERT INTO public.users(email, password, username) VALUES($1, $2, $3) RETURNING ${publicColumns}`, [data.email, data.password, data.username], (err, result) => cb(err, result?.rows));
+};
+
+exports.registerUser = async (data) => {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(`INSERT INTO public.users(email, password, username) VALUES($1, $2, $3) RETURNING ${publicColumns}`, [data.email, data.password, data.username]);
+    const user = result.rows[0];
+    await client.query('INSERT INTO public.profile(user_id) VALUES($1)', [user.id]);
+    await client.query('COMMIT');
+    return user;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+};
 
 exports.updateUser = (id, data, cb) => {
-  val = [id]
-  const filtered = {}
-  const obj = {
-    email: data.email,
-    password: data.password,
-    username: data.username,
-    pin: data.pin,
-  }
+  const entries = Object.entries({ email: data.email, username: data.username, password: data.password }).filter(([, value]) => value !== undefined);
+  if (!entries.length) return cb(httpError(400, 'No editable fields supplied'));
+  const assignments = entries.map(([key], index) => `${key}=$${index + 2}`).join(', ');
+  db.query(`UPDATE public.users SET ${assignments} WHERE id=$1 RETURNING ${publicColumns}`, [id, ...entries.map(([, value]) => value)], (err, result) => cb(err, result?.rows[0]));
+};
 
-  for (x in obj) {
-    if (obj[x] !== null) {
-      if (obj[x] !== undefined) {
-        filtered[x] = obj[x]
-        val.push(obj[x])
-      }
-    }
-  }
+exports.changePassword = (id, oldHash, newHash, cb) => {
+  // A concurrent change must not be overwritten using stale credentials.
+  db.query(`UPDATE public.users SET password=$3 WHERE id=$1 AND password=$2 RETURNING ${publicColumns}`, [id, oldHash, newHash], (err, result) => cb(err, result?.rows[0]));
+};
 
-  const key = Object.keys(filtered)
-  const finalResult = key.map((val, index) => `${val}=$${index + 2}`)
-  const query = `UPDATE users SET ${finalResult} WHERE id=$1 RETURNING *`
-  db.query(query, val, (err, res) => {
-    if (res) {
-      // console.log('ini dari model user saat create pin', res);
-      cb(err, res.rows[0])
-    } else {
-      console.log(err)
-      cb(err)
-    }
-  })
-}
-
-exports.changePassword = (id, data, cb) => {
-  val = [id, data]
-
-  const query = `UPDATE users SET password=$2 WHERE id=$1 RETURNING *`
-  db.query(query, val, (err, res) => {
-    if (res) {
-      console.log('ini res', res.rows[0])
-      cb(err, res.rows[0])
-    } else {
-      console.log('error', err)
-      cb(err)
-    }
-  })
-}
-
-exports.changePin = (id, data, cb) => {
-  val = [id, data]
-
-  const query = `UPDATE users SET pin=$2 WHERE id=$1 RETURNING *`
-  db.query(query, val, (err, res) => {
-    if (res) {
-      // console.log(res.rows);
-      cb(err, res.rows[0])
-    } else {
-      console.log(err)
-      cb(err)
-    }
-  })
-}
-
-exports.deleteUser = (id, cb) => {
-  const query = 'DELETE FROM users WHERE id=$1 RETURNING *'
-  const value = [id]
-  db.query(query, value, (err, res) => {
-    cb(res.rows)
-  })
-}
-
-exports.topup = (id, data, cb) => {
-  const query = 'UPDATE profile SET balance=balance + $2 WHERE user_id=$1 RETURNING balance'
-  const value = [id, data.amount]
-  db.query(query, value, (err, res) => {
-    // console.log(res.rows);
-    cb(err, res.rows)
-  })
-}
-
-exports.checkEmail = (email, cb) => {
-  const query = 'SELECT id, email, username FROM users WHERE email=$1'
-  const value = [email]
-  db.query(query, value, (err, res) => {
-    cb(err, res.rows[0])
-  })
-}
+exports.deleteUser = (id, cb) => db.query(`DELETE FROM public.users WHERE id=$1 RETURNING ${publicColumns}`, [id], (err, result) => cb(err, result?.rows[0]));

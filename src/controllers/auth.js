@@ -1,348 +1,112 @@
-const userModel = require('../models/users')
-const profileModel = require('../models/profile')
-const transactionModel = require('../models/transactions')
-const response = require('../helpers/standardResponse')
-const errorResponse = require('../helpers/errorResponse')
-const { validationResult } = require('express-validator')
-const bcrypt = require('bcrypt')
-const jwt = require('jsonwebtoken')
-const upload = require('../helpers/upload').single('picture')
-const uploadCloud = require('../helpers/cloudUpload').single('picture')
+const { promisify } = require('node:util');
+const { validationResult } = require('express-validator');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const users = require('../models/users');
+const profiles = require('../models/profile');
+const transactions = require('../models/transactions');
+const pin = require('../helpers/pin');
+const response = require('../helpers/standardResponse');
+const { jwtSecret, credentialVersion, safeUser, validationErrors, httpError } = require('../helpers/security');
+const upload = require('../helpers/cloudUpload').single('picture');
 
-exports.register = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  userModel.createUsers(req.body, (err, userResult) => {
-    req.body.pin = null
-    if (err) {
-      return errorResponse(err, res)
-    }
-    // console.log(userResult[0].id);
-    profileModel.createProfileAfterRegister(userResult[0].id, (err, result) => {
-      return response(res, 'Good Job', userResult)
-    })
-  })
+function validate(req, res) {
+  const validation = validationResult(req);
+  if (validation.isEmpty()) return true;
+  response(res, 'Invalid input', validationErrors(validation), null, 400);
+  return false;
 }
 
-exports.createPin = (req, res) => {
-  console.log(req)
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { email } = req.body
-  userModel.getUserByEmail(email, (err, result) => {
-    if (result.rows.length > 0) {
-      const user = result.rows[0]
-      // console.log(user);
-      if (result.rows[0].pin === null) {
-        userModel.updateUser(user.id, { pin: req.body.pin }, (req, resultUpdate) => {
-          const userUpdated = resultUpdate
-          if (userUpdated.email == user.email) {
-            return response(res, 'Create PIN success', resultUpdate.pin)
-          }
-        })
-      } else {
-        return response(res, 'Error: PIN already set', null, null, 401)
-      }
-    } else {
-      return response(res, 'Error: Email does not exist', null, null, 401)
-    }
-  })
-}
+exports.register = async (req, res) => {
+  if (!validate(req, res)) return;
+  const password = await bcrypt.hash(req.body.password, 12);
+  const user = await users.registerUser({ email: req.body.email, username: req.body.username, password });
+  return response(res, 'Registration successful. Log in to set your PIN', safeUser(user), null, 201);
+};
 
-exports.login = (req, res) => {
-  // console.log(req.body);
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // console.log(validation.array());
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { email, password } = req.body
-  userModel.getUserByEmail(email, (err, result) => {
-    console.log(result.rows.length)
-    if (result.rows.length <= 0) {
-      return response(res, 'User not found', null, null, 400)
-    }
-    const user = result.rows[0]
-    console.log(user)
-    bcrypt
-      .compare(password, user.password)
-      .then((cpRes) => {
-        // console.log(cpRes);
-        if (cpRes) {
-          const token = jwt.sign({ id: user.id }, process.env.APP_SECRET || 'mYF1rStb4ck3nd')
-          return response(res, 'Login success', { token, pin: user.pin, email: user.email, username: user.username })
-        }
-        // console.log(cpRes);
-        return response(res, 'Email or password not match', null, null, 404)
-      })
-      .catch((e) => {
-        console.log(e)
-        return response(res, 'Email or password not match', null, null, 404)
-      })
-  })
-}
+exports.login = async (req, res) => {
+  if (!validate(req, res)) return;
+  const result = await promisify(users.getCredentialsByEmail)(req.body.email);
+  const user = result.rows[0];
+  if (!user || !await bcrypt.compare(req.body.password, user.password)) throw httpError(401, 'Email or password not matched');
+  const token = jwt.sign({ id: user.id, credentialVersion: credentialVersion(user.password) }, jwtSecret(), { algorithm: 'HS256', expiresIn: '1h' });
+  return response(res, 'Login success', { ...safeUser(user), token, pinSet: Boolean(user.pin_hash || user.pin) });
+};
 
-exports.getUserData = (req, res) => {
-  const id = req.authUser.id
-  console.log('ini dari auth', id)
-  profileModel.getProfileByUserId(id, (err, result) => {
-    if (result.rows.length > 0) {
-      return response(res, 'Detail user', result.rows[0])
-    } else {
-      return res.redirect('/404')
-    }
-  })
-}
+exports.createPin = async (req, res) => {
+  if (!validate(req, res)) return;
+  await pin.create(req.authUser.id, req.body.pin);
+  return response(res, 'Create PIN success');
+};
 
-const { LIMIT_DATA } = process.env
-exports.getUserTransaction = (req, res) => {
-  const id = req.authUser.id
-  const { search = '', limit = parseInt(LIMIT_DATA), page = 1 } = req.query
-  const offset = (page - 1) * limit
-  transactionModel.getTransactionUser(id, limit, offset, (err, result) => {
-    if (result.length > 0) {
-      const pageInfo = {}
-      transactionModel.countAllTransaction(id, (err, totalData) => {
-        pageInfo.totalData = totalData
-        pageInfo.totalPage = Math.ceil(totalData / limit)
-        pageInfo.currentPage = parseInt(page)
-        pageInfo.nextPage = pageInfo.currentPage < pageInfo.totalPage ? pageInfo.currentPage + 1 : null
-        pageInfo.prevPage = pageInfo.currentPage > 1 ? pageInfo.currentPage - 1 : null
-        return response(res, 'List all transaction', result, pageInfo)
-      })
-    } else {
-      return response(res, 'not found', null, null, 400)
-    }
-  })
-}
+exports.checkPin = async (req, res) => {
+  if (!validate(req, res)) return;
+  await pin.verify(req.authUser.id, req.body.pin);
+  return response(res, 'PIN valid');
+};
 
-exports.editProfile = (req, res) => {
-  const id = req.authUser.id
-  uploadCloud(req, res, (err) => {
-    if (err) {
-      console.log(err)
-      return response(res, `Failed Upload ${err.message}`, null, null, 400)
-    }
-    let filename = null
-    if (req.file) {
-      filename = req.file.filename
-    }
+exports.changePin = async (req, res) => {
+  if (!validate(req, res)) return;
+  await pin.change(req.authUser.id, req.body.pin, req.body.newpin);
+  return response(res, 'Change PIN successful');
+};
 
-    profileModel.editProfile(id, req.body, filename, (err, result) => {
-      if (err) {
-        console.log(err)
-        return errorResponse(err, res)
-      } else {
-        return response(res, 'Edit profile successfully', result)
-      }
-    })
-  })
-  // upload(req, res, (err) => {
-  //   if (err) {
-  //     console.log(err);
-  //     return response(res, `Failed to update profile: ${err.message}`, null, null, 404);
-  //   }
-  // });
-}
+exports.getUserData = async (req, res) => {
+  const result = await promisify(profiles.getProfileByUserId)(req.authUser.id);
+  if (!result.rows[0]) throw httpError(404, 'Profile not found');
+  return response(res, 'Detail user', result.rows[0]);
+};
 
-exports.changePassword = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.authUser
-  const { password } = req.body
-  userModel.getUserById(id, (err, result) => {
-    console.log(req.body.newpassword)
-    const user = result.rows[0]
-    bcrypt.compare(password, user.password).then((cpRes) => {
-      console.log(cpRes)
-      if (cpRes) {
-        userModel.changePassword(id, req.body.newpassword, (err, result) => {
-          console.log(result)
-          if (err) {
-            return errorResponse(err, res)
-          } else {
-            return response(res, 'Change Password successfully', result[0])
-          }
-        })
-      } else {
-        console.log(cpRes)
-        return response(res, 'Email or password not match', null, null, 404)
-      }
-    })
-  })
-}
+exports.getUserTransaction = async (req, res) => {
+  const id = req.authUser.id;
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const result = await promisify(transactions.getTransactionUser)(id, limit, (page - 1) * limit);
+  const totalData = await promisify(transactions.countAllTransaction)(id);
+  const totalPage = Math.ceil(totalData / limit);
+  return response(res, 'Transaction history', result, { totalData, totalPage, currentPage: page, nextPage: page < totalPage ? page + 1 : null, prevPage: page > 1 ? page - 1 : null });
+};
 
-exports.changePin = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.authUser
-  const pin = req.body.pin
-  const newPin = req.body.newpin
-  userModel.getUserById(id, (err, user) => {
-    // console.log(user.rows[0]);
-    if (pin === user.rows[0].pin) {
-      userModel.changePin(id, newPin, (err, result) => {
-        console.log(newPin)
-        console.log(result)
-        if (err) {
-          return errorResponse(err, res)
-        } else {
-          return response(res, 'Change PIN successfully', result.pin)
-        }
-      })
-    } else {
-      return response(res, 'Pliese input old PIN correctly')
-    }
-  })
-}
+exports.editProfile = async (req, res) => {
+  await new Promise((resolve, reject) => upload(req, res, (err) => err ? reject(httpError(400, 'Invalid profile upload')) : resolve()));
+  const fields = req.body || {};
+  if (Object.keys(fields).some((key) => !['fullname', 'phone_number'].includes(key))) throw httpError(400, 'Only fullname, phone_number and an uploaded picture may be edited');
+  if (fields.fullname !== undefined && (typeof fields.fullname !== 'string' || !fields.fullname.trim() || fields.fullname.length > 255)) throw httpError(400, 'Invalid full name');
+  if (fields.phone_number !== undefined && (typeof fields.phone_number !== 'string' || !/^\+?[0-9]{8,15}$/.test(fields.phone_number))) throw httpError(400, 'Invalid phone number');
+  const result = await promisify(profiles.editOwnProfile)(req.authUser.id, fields, req.file?.filename);
+  if (!result.length) throw httpError(404, 'Profile not found');
+  return response(res, 'Edit profile successful', result);
+};
 
-exports.changePhoneNumber = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.authUser
-  profileModel.changePhoneNumber(id, req.body, (err, result) => {
-    if (err) {
-      return errorResponse(err, res)
-    } else {
-      return response(res, 'Change Phone Number successfully', result)
-    }
-  })
-}
+exports.changePassword = async (req, res) => {
+  // The old ID-only recovery endpoint is now a self-service, reauthenticated change.
+  if (req.params.id !== undefined && req.params.id !== String(req.authUser.id)) throw httpError(403, 'You can only change your own password');
+  if (!validate(req, res)) return;
+  const { rows } = await promisify(users.getCredentialsById)(req.authUser.id);
+  const user = rows[0];
+  if (!user || !await bcrypt.compare(req.body.password, user.password)) throw httpError(401, 'Current password is incorrect');
+  const password = await bcrypt.hash(req.body.newpassword, 12);
+  const result = await promisify(users.changePassword)(user.id, user.password, password);
+  if (!result) throw httpError(409, 'Password changed. Please log in again');
+  return response(res, 'Password changed. Please log in again');
+};
+exports.resetPassword = exports.changePassword;
 
-exports.addPhoneNumber = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.authUser
-  profileModel.changePhoneNumber(id, req.body, (err, result) => {
-    if (err) {
-      return errorResponse(err, res)
-    } else {
-      return response(res, 'Phone number change')
-    }
-  })
-}
+exports.changePhoneNumber = async (req, res) => {
+  if (!validate(req, res)) return;
+  const result = await promisify(profiles.changePhoneNumber)(req.authUser.id, { phonenumber: req.body.phonenumber });
+  if (!result) throw httpError(404, 'Profile not found');
+  return response(res, 'Phone number changed', result);
+};
+exports.addPhoneNumber = exports.changePhoneNumber;
 
-exports.transfer = (req, res) => {
-  console.log('ini req body', req.body)
-  req.body.type_id = parseInt(req.body.type_id)
-  req.body.recipient_id = parseInt(req.body.recipient_id)
-  req.body.amount = parseInt(req.body.amount)
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.authUser
-  console.log('ini id', id)
-  const { pin } = req.body
-  userModel.getUserById(id, (err, user) => {
-    console.log(user.rows[0].pin)
-    if (pin == user.rows[0].pin) {
-      transactionModel.transfer(id, req.body, (err, result) => {
-        if (err) {
-          return errorResponse(err, res)
-        } else {
-          // console.log(result);
-          profileModel.increaseBalance(result[0].amount, result[0].recipient_id, (err, result) => {
-            if (err) return console.log(err)
-          })
-          profileModel.decreaseBalance(result[0].amount, result[0].sender_id, (err, result) => {
-            return response(res, 'Balance decrease', result, null, 200)
-          })
-        }
-      })
-    } else {
-      return response(res, 'PIN does not valid', null, null, 400)
-    }
-  })
-}
+exports.checkEmail = (req, res) => response(res, 'If the account exists, use the supported sign-in or recovery process');
 
-exports.topup = (req, res) => {
-  const { id } = req.authUser
-  // userModel.topup(id, req.body, (err, result) => {
-  //   return response(res, 'Top Up successfully', result)
-  // })
-
-  userModel.getUserById(id, (err, user) => {
-    transactionModel.transfer(id, req.body, (err, result) => {
-      if (err) {
-        return errorResponse(err, res)
-      } else {
-        // console.log(result);
-        profileModel.increaseBalance(result[0].amount, result[0].recipient_id, (err, result) => {
-          if (err) return console.log(err)
-          return response(res, 'Top Up Successfully', result, null, 200)
-        })
-      }
-    })
-  })
-}
-
-exports.checkPin = (req, res) => {
-  const { id } = req.authUser
-  const { pin } = req.body
-  userModel.getUserById(id, (err, user) => {
-    if (pin == user.rows[0].pin) {
-      return response(res, 'PIN valid')
-    } else {
-      return response(res, 'PIN does not valid', null, null, 400)
-    }
-  })
-}
-
-exports.checkEmail = (req, res) => {
-  const { email } = req.body
-  userModel.checkEmail(email, (err, user) => {
-    console.log(user)
-    if (user) {
-      return response(res, 'User founded', user)
-    } else {
-      return response(res, 'User not found with this email', null, null, 400)
-    }
-  })
-}
-
-exports.resetPassword = (req, res) => {
-  const validation = validationResult(req)
-  if (!validation.isEmpty()) {
-    // is empty menandakan tidak ada error
-    console.log(validation.array())
-    return response(res, 'Error occured', validation.array(), null, 400)
-  }
-  const { id } = req.params
-
-  userModel.changePassword(id, req.body.newpassword, (err, result) => {
-    console.log(err)
-    if (result) {
-      return response(res, 'Reset Password successfully', result[0])
-    } else {
-      console.log(err)
-      return response(res, 'Reset Password failed', null, null, 400)
-    }
-  })
-}
+// Legacy financial writes are non-atomic and accept unverified top ups. Keep them
+// disabled as required by migrations/README.md until the wallet service is ready.
+exports.transfer = async (req, res) => {
+  if (!validate(req, res)) return;
+  await pin.verify(req.authUser.id, req.body.pin);
+  return response(res, 'Transfers are temporarily unavailable', null, null, 503);
+};
+exports.topup = (req, res) => response(res, 'Top ups are temporarily unavailable', null, null, 503);

@@ -33,7 +33,6 @@ exports.editTransactionType = (req, res) => {
   const { id } = req.params;
   transactionTypeModels.editTransactionType(id, req.body, (err, result) => {
     if (err) {
-      console.log(err);
       return errorResponse(err, res);
     } else {
       return response(res, 'Edit transaction type successfully', result[0]);

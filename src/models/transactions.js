@@ -20,16 +20,15 @@ exports.getTransactionUser = (id, limit, offset = 0, cb) => {
       if (res) {
         cb(err, res.rows)
       } else {
-        console.log(err)
+        cb(err)
       }
     }
   )
 }
 
 exports.countAllTransaction = (id, cb) => {
-  db.query(`SELECT * FROM transaction WHERE sender_id=${id}`, (err, res) => {
-    // console.log(res.rowCount);
-    cb(err, res.rowCount)
+  db.query('SELECT count(*)::integer AS count FROM public.transaction WHERE sender_id=$1', [id], (err, res) => {
+    cb(err, res?.rows[0].count)
   })
 }
 
@@ -73,7 +72,6 @@ exports.transfer = (id, data, cb) => {
   db.query(query, val, (err, res) => {
     // console.log(res);
     if (err) {
-      console.log(err)
       cb(err)
     } else {
       cb(err, res.rows)
@@ -89,7 +87,6 @@ exports.editTransaction = (id, data, cb) => {
       // console.log(res);
       cb(err, res.rows)
     } else {
-      console.log(err)
       cb(err)
     }
   })
