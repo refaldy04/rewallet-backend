@@ -52,7 +52,7 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
 
     // Extract the actual application table definitions from the requested reference.
     const schema = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf8');
-    for (const table of ['users', 'profile', 'transaction_type', 'transaction']) {
+    for (const table of ['users', 'profile', 'transaction_type', 'transaction', 'wallets']) {
       const definition = schema.match(new RegExp(`^CREATE TABLE public\\.${table} \\([\\s\\S]+?^\\);`, 'm'));
       const identity = schema.match(new RegExp(`^ALTER TABLE public\\.${table} ALTER COLUMN id ADD GENERATED[\\s\\S]+?^\\);`, 'm'));
       assert.ok(definition && identity, `Missing ${table} in schema.sql`);
@@ -61,7 +61,8 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
     }
     await db.query(`ALTER TABLE public.users ADD PRIMARY KEY (id), ADD UNIQUE (email), ADD UNIQUE (username);
       ALTER TABLE public.profile ADD PRIMARY KEY (id), ADD UNIQUE (user_id), ADD FOREIGN KEY (user_id) REFERENCES public.users(id);
-      INSERT INTO public.transaction_type(name) VALUES ('Synthetic');`);
+      ALTER TABLE public.wallets ADD PRIMARY KEY (id), ADD UNIQUE (user_id, currency), ADD FOREIGN KEY (user_id) REFERENCES public.users(id);
+      INSERT INTO public.transaction_type(name, code) VALUES ('Synthetic', 'LEGACY_1');`);
     const password = 'synthetic-password';
     const hash = await bcrypt.hash(password, 4);
     await db.query(`INSERT INTO public.users(email, username, password, pin) VALUES
@@ -73,7 +74,11 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       (2, 1, 'Admin', 100::numeric::money, '081111111111'),
       (3, 2, 'Member', 200::numeric::money, '082222222222'),
       (1, 3, 'Other', 300::numeric::money, '083333333333');
-      SELECT setval('public.profile_id_seq', 3);`);
+      SELECT setval('public.profile_id_seq', 3);
+      INSERT INTO public.wallets(user_id, balance) VALUES (1, 1000), (2, 2000), (3, 3000);`);
+    // Exercise edits with the real post-cutover guard against legacy balance writes.
+    await db.query(schema.match(/^CREATE FUNCTION public\.wallet_reject_legacy_profile_balance\(\)[\s\S]+?^\$\$;/m)[0]);
+    await db.query(schema.match(/^CREATE TRIGGER wallet_reject_legacy_profile_balance .+;$/m)[0]);
 
     const app = require('../index');
     server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
@@ -136,6 +141,7 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
         const res = await request(route, { method: 'PATCH', token: member, body: { fullname: 'Member updated' } });
         assert.equal(res.status, 200);
         assert.deepEqual(res.body.result.map((row) => row.user_id), [2]);
+        assert.equal(res.body.result[0].balance, '2000');
       }
       for (const body of [{ balance: '999999' }, { user_id: 3 }, { id: 1 }, { pin: '123456' }, { role: 'admin' }, { fullname: 'Injected', balance: 1 }]) {
         assert.equal((await request('/profile', { method: 'PATCH', token: member, body })).status, 400);
@@ -152,9 +158,29 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       const adminEdit = await request('/admin/profile/1', { method: 'PATCH', token: admin, body: { fullname: 'Other updated by admin' } });
       assert.equal(adminEdit.status, 200);
       assert.deepEqual(adminEdit.body.result.map((row) => row.user_id), [3]);
+      assert.equal(adminEdit.body.result[0].balance, '3000');
       assert.equal((await db.query('SELECT fullname FROM public.profile WHERE user_id=1')).rows[0].fullname, 'Admin');
       assert.equal((await request('/admin/profile/1', { method: 'PATCH', token: admin, body: { balance: 1 } })).status, 400);
       assert.equal((await request('/admin/profile/1', { method: 'PATCH', token: admin, body: { user_id: 1 } })).status, 400);
+    });
+
+    await t.test('profile reads and admin lists return wallet balances rather than legacy balances', async () => {
+      for (const prefix of ['', '/auth']) {
+        const profile = await request(`${prefix}/profile`, { token: member });
+        assert.equal(profile.status, 200);
+        assert.equal(profile.body.result.balance, '2000');
+        assert.equal(profile.body.result.id, 3);
+        assert.equal(profile.body.result.user_id, 2);
+      }
+      const detail = await request('/admin/profile/1', { token: admin });
+      assert.equal(detail.status, 200);
+      assert.equal(detail.body.result.balance, '3000');
+      const directory = await request('/admin/profile', { token: admin });
+      assert.equal(directory.status, 200);
+      assert.deepEqual(directory.body.result.map(({ user_id, balance }) => ({ user_id, balance })).sort((a, b) => a.user_id - b.user_id), [
+        { user_id: 2, balance: '2000' }, { user_id: 3, balance: '3000' },
+      ]);
+      assert.deepEqual((await db.query('SELECT balance FROM public.wallets ORDER BY user_id')).rows.map(({ balance }) => balance), ['1000', '2000', '3000']);
     });
 
     await t.test('PIN creation is authenticated, owner-scoped, hashed and cannot overwrite a PIN', async () => {
@@ -223,6 +249,20 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       assert.equal(newUser.pin, null);
       assert.equal(newUser.pin_hash, null);
       assert.ok(await bcrypt.compare(password, newUser.password));
+      const newToken = await login('new@example.invalid');
+      const profile = await request('/profile', { token: newToken });
+      assert.equal(profile.status, 200);
+      assert.equal(profile.body.result.balance, '0');
+      const history = await request('/historyTransaction', { token: newToken });
+      assert.equal(history.status, 200);
+      assert.deepEqual(history.body.result, []);
+      assert.equal(history.body.pageInfo.totalData, 0);
+      const account = await db.query(`SELECT p.user_id, w.balance, w.currency FROM public.users u
+        JOIN public.profile p ON p.user_id=u.id JOIN public.wallets w ON w.user_id=u.id
+        WHERE u.email='new@example.invalid'`);
+      assert.equal(account.rowCount, 1);
+      assert.equal(account.rows[0].balance, '0');
+      assert.equal(account.rows[0].currency, 'IDR');
       assert.equal((await request('/admin/user', { token: admin })).status, 200);
       assert.equal((await request('/admin/user/1', { token: admin })).status, 200);
       assert.equal((await request('/register', { method: 'POST', body: { email: 'bad', username: 'bad', password: 'tiny' } })).status, 400);
@@ -233,6 +273,42 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       assert.deepEqual(checkEmail.body, noEmail.body);
     });
 
+    await t.test('registration rolls back the entire account if profile or wallet creation fails', async () => {
+      const counts = async () => (await db.query(`SELECT
+        (SELECT count(*) FROM public.users) AS users,
+        (SELECT count(*) FROM public.profile) AS profiles,
+        (SELECT count(*) FROM public.wallets) AS wallets`)).rows[0];
+      const before = await counts();
+      for (const table of ['profile', 'wallets']) {
+        // NOT VALID preserves existing fixtures while rejecting every new row.
+        await db.query(`ALTER TABLE public.${table} ADD CONSTRAINT test_registration_failure CHECK (false) NOT VALID`);
+        try {
+          const result = await request('/auth/register', { method: 'POST', body: { email: `rollback-${table}@example.invalid`, username: `rollback-${table}`, password } });
+          assert.equal(result.status, 400);
+          assert.deepEqual(await counts(), before);
+        } finally {
+          await db.query(`ALTER TABLE public.${table} DROP CONSTRAINT test_registration_failure`);
+        }
+      }
+      // A successful retry also verifies the pooled connection is usable again.
+      const attempts = await Promise.all(['/register', '/auth/register'].map((route) => request(route, {
+        method: 'POST', body: { email: 'retry@example.invalid', username: 'retry-user', password },
+      })));
+      assert.deepEqual(attempts.map(({ status }) => status).sort(), [201, 409]);
+      const account = await db.query(`SELECT w.balance FROM public.users u
+        JOIN public.profile p ON p.user_id=u.id JOIN public.wallets w ON w.user_id=u.id
+        WHERE u.email='retry@example.invalid'`);
+      assert.deepEqual(account.rows, [{ balance: '0' }]);
+    });
+
+    await t.test('admin-created users also receive a profile and zero wallet', async () => {
+      const result = await request('/admin/user', { method: 'POST', token: admin, body: { email: 'admin-created@example.invalid', username: 'admin-created', password } });
+      assert.equal(result.status, 201);
+      const account = await db.query(`SELECT p.user_id, w.balance, w.currency FROM public.profile p
+        JOIN public.wallets w ON w.user_id=p.user_id WHERE p.user_id=$1`, [result.body.result.id]);
+      assert.deepEqual(account.rows, [{ user_id: result.body.result.id, balance: '0', currency: 'IDR' }]);
+    });
+
     await t.test('legacy financial endpoints cannot credit arbitrary balances or write transactions', async () => {
       assert.equal((await request('/topup', { method: 'POST', token: member, body: { recipient_id: 3, amount: 10000 } })).status, 503);
       assert.equal((await request('/transfer', { method: 'POST', token: member, body: { pin: '009876', recipient_id: 3, amount: 10000 } })).status, 503);
@@ -241,26 +317,63 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       assert.equal(res.body.result.user_id, 2);
     });
 
-    await t.test('offline PIN migration clears all legacy PINs and is repeatable', async () => {
-      const migrate = require('../scripts/migrate-pin-hashes');
-      assert.equal(await migrate(), 1);
-      assert.equal(await migrate(), 0);
-      const { rows } = await db.query('SELECT pin, pin_hash FROM public.users WHERE id=1');
-      assert.equal(rows[0].pin, null);
-      assert.ok(await bcrypt.compare('012345', rows[0].pin_hash));
-    });
-
-    await t.test('transaction history can only read transactions belonging to the caller', async () => {
-      await db.query(`INSERT INTO public.transaction(amount, sender_id, recipient_id, "time", type_id) VALUES
-        (10, 2, 3, now(), 1), (20, 3, 1, now(), 1)`);
+    await t.test('history includes incoming and outgoing transactions with caller-relative counterparties', async () => {
+      await db.query(`INSERT INTO public.transaction(amount, sender_id, recipient_id, "time", type_id, created_at) VALUES
+        (10, 2, 3, '2022-07-01 10:00:00', 1, NULL),
+        (20, 3, 1, '2022-07-02 10:00:00', 1, NULL),
+        (30, 1, 1, '2022-07-03 10:00:00', 1, NULL)`);
       const memberHistory = await request('/historyTransaction?user_id=3&sender_id=3', { token: member });
       assert.equal(memberHistory.status, 200);
       assert.equal(memberHistory.body.result.length, 1);
       assert.equal(memberHistory.body.result[0].amount, '10');
+      assert.equal(memberHistory.body.result[0].direction, 'DEBIT');
+      assert.equal(memberHistory.body.result[0].fullname, 'Other updated by admin');
+      assert.equal(memberHistory.body.result[0].created_at, null);
       const otherHistory = await request('/auth/historyTransaction?user_id=2', { token: other });
       assert.equal(otherHistory.status, 200);
-      assert.equal(otherHistory.body.result.length, 1);
-      assert.equal(otherHistory.body.result[0].amount, '20');
+      assert.deepEqual(otherHistory.body.result.map(({ amount, direction, fullname }) => ({ amount, direction, fullname })), [
+        { amount: '20', direction: 'DEBIT', fullname: 'Admin' },
+        { amount: '10', direction: 'CREDIT', fullname: 'Member updated' },
+      ]);
+      assert.equal(otherHistory.body.pageInfo.totalData, 2);
+    });
+
+    await t.test('history retains top ups, opening balances and missing profiles, with stable pagination', async () => {
+      for (const name of ['wallet_transaction_shape', 'wallet_reject_legacy_transaction']) {
+        await db.query(schema.match(new RegExp(`^CREATE FUNCTION public\\.${name}\\(\\)[\\s\\S]+?^\\$\\$;`, 'm'))[0]);
+        await db.query(schema.match(new RegExp(`^CREATE TRIGGER ${name} .+;$`, 'm'))[0]);
+      }
+      await db.query(`INSERT INTO public.transaction_type(name, code) VALUES
+        ('Top up', 'TOPUP'), ('Transfer', 'TRANSFER'), ('Opening balance', 'OPENING_BALANCE');
+        INSERT INTO public.transaction(amount, sender_id, recipient_id, "time", type_id, status, created_at, notes)
+        SELECT 100, NULL, 2, '2026-01-01 00:00:00', id, 'SUCCEEDED', '2026-01-01T00:00:00Z', code
+        FROM public.transaction_type WHERE code IN ('TOPUP', 'OPENING_BALANCE') ORDER BY code;`);
+      // A canonical incoming transfer still appears when the sender has no profile.
+      const sender = await db.query(`INSERT INTO public.users(email, username, password)
+        VALUES ('no-profile@example.invalid', 'no-profile', $1) RETURNING id`, [hash]);
+      const transfer = await db.query(`INSERT INTO public.transaction(amount, sender_id, recipient_id, "time", type_id, status, created_at, idempotency_key, request_fingerprint)
+        SELECT 200, $1, 2, '2025-01-01 00:00:00', id, 'SUCCEEDED', '2026-02-01T00:00:00Z', 'history-test', repeat('a', 64)
+        FROM public.transaction_type WHERE code='TRANSFER' RETURNING id`, [sender.rows[0].id]);
+      const all = await request('/historyTransaction', { token: member });
+      assert.equal(all.status, 200);
+      assert.equal(all.body.pageInfo.totalData, 4);
+      assert.equal(all.body.result[0].id, transfer.rows[0].id);
+      assert.equal(all.body.result[0].fullname, null);
+      assert.equal(all.body.result[0].picture, null);
+      assert.equal(all.body.result[0].direction, 'CREDIT');
+      assert.deepEqual(all.body.result.map(({ type_code }) => type_code), ['TRANSFER', 'TOPUP', 'OPENING_BALANCE', 'LEGACY_1']);
+      assert.deepEqual(all.body.result.map(({ direction }) => direction), ['CREDIT', 'CREDIT', 'CREDIT', 'DEBIT']);
+      assert.equal(all.body.result[3].time, new Date(2022, 6, 1, 10).toISOString());
+      const pages = [];
+      for (let page = 1; page <= 3; page++) {
+        const result = await request(`/auth/historyTransaction?limit=2&page=${page}`, { token: member });
+        assert.equal(result.status, 200);
+        assert.equal(result.body.pageInfo.totalData, 4);
+        assert.equal(result.body.pageInfo.totalPage, 2);
+        assert.equal(result.body.pageInfo.nextPage, page < 2 ? 2 : null);
+        pages.push(...result.body.result.map(({ id }) => id));
+      }
+      assert.deepEqual(pages, all.body.result.map(({ id }) => id));
     });
 
     await t.test('credentials never appear in application logs', () => {

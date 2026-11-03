@@ -37,7 +37,8 @@ npm start
 
 Configure the database, JWT secret and Cloudinary environment variables
 before using the corresponding endpoints. The local server listens on port 3334.
-Run `npm test` for the Cloudinary adapter and security regression checks.
+Run `npm test` for the Cloudinary adapter, wallet reads/registration and security
+regression checks.
 Security integration tests start a disposable local PostgreSQL cluster when
 `initdb` and `pg_ctl` are on PATH, and otherwise report a skip. They use the
 application table definitions from `schema.sql`, synthetic data and real HTTP
@@ -53,10 +54,31 @@ not fix vulnerabilities in application dependencies.
 ### API usage
 
 Registration and PIN setup are separate steps: `/auth/register` creates an
-account and profile atomically. Log in at `/auth/login`, then send the returned
+account, profile and zero-balance IDR wallet atomically on one database
+connection. A failed insert rolls back all three. Admin account creation at
+`POST /admin/user` uses the same setup. Log in at `/auth/login`, then send the returned
 Bearer token with `/auth/createPin`. PIN setup always uses the authenticated
 account; the old email-based PIN setup is no longer supported. Submit PINs as
 six-character strings so leading zeros are preserved.
+
+Profile responses, including admin reads and profile edits, take `balance` from
+`wallets` by `profile.user_id` and currency `IDR`. The legacy `profile.balance`
+column is no longer returned as the active balance. Balances and transaction
+amounts are PostgreSQL `BIGINT` values returned as decimal strings in whole
+rupiah, for example `"0"` or `"125000"`.
+
+`GET /historyTransaction` includes transactions where the authenticated user is
+the sender or recipient. `direction` is `CREDIT` for incoming transactions and
+`DEBIT` for outgoing transactions; legacy self top ups appear once as `CREDIT`.
+`fullname` and `picture` describe the other party, and can be null for top ups,
+opening balances or missing profiles. Results also include `sender_id`,
+`recipient_id`, `type_code`, `status`, `currency`, `reference_id`, `notes` and
+`created_at`. Use `type_code` for canonical types rather than hardcoded numeric
+IDs, and use `status` to distinguish pending or failed transactions from success.
+Pagination counts both directions. New transactions sort by `created_at` first;
+legacy rows with no `created_at` follow in descending `time` order. IDs break
+timestamp ties. The legacy timestamp remains available without assigning it an
+assumed historical timezone.
 
 ### Security configuration and API changes
 

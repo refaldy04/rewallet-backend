@@ -19,8 +19,8 @@ exports.countAllUsers = (keyword, cb) => {
 };
 
 exports.createUsers = (data, cb) => {
-  // PINs can only be set through the authenticated PIN service.
-  db.query(`INSERT INTO public.users(email, password, username) VALUES($1, $2, $3) RETURNING ${publicColumns}`, [data.email, data.password, data.username], (err, result) => cb(err, result?.rows));
+  // Admin-created accounts use the same atomic setup as public registration.
+  exports.registerUser(data).then((user) => cb(null, [user]), cb);
 };
 
 exports.registerUser = async (data) => {
@@ -30,6 +30,7 @@ exports.registerUser = async (data) => {
     const result = await client.query(`INSERT INTO public.users(email, password, username) VALUES($1, $2, $3) RETURNING ${publicColumns}`, [data.email, data.password, data.username]);
     const user = result.rows[0];
     await client.query('INSERT INTO public.profile(user_id) VALUES($1)', [user.id]);
+    await client.query('INSERT INTO public.wallets(user_id) VALUES($1)', [user.id]);
     await client.query('COMMIT');
     return user;
   } catch (err) {
