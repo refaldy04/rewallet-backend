@@ -1,46 +1,28 @@
 const db = require('../helpers/db');
+const { httpError } = require('../helpers/security');
 
 exports.getAllTransactionsType = (cb) => {
-  db.query('SELECT * FROM transaction_type ORDER BY id ASC', (err, res) => {
-    cb(res.rows);
-  });
+  db.query('SELECT * FROM public.transaction_type ORDER BY id ASC', (err, result) => cb(err, result?.rows));
 };
 
 exports.getTransactionTypeById = (id, cb) => {
-  db.query('SELECT * FROM transaction_type WHERE id=$1', [id], (err, res) => {
-    cb(err, res);
-  });
+  db.query('SELECT * FROM public.transaction_type WHERE id=$1', [id], cb);
 };
 
 exports.createTransactionType = (data, cb) => {
-  const query = 'INSERT INTO transaction_type(name, description) VALUES($1, $2) RETURNING *';
-  const values = [data.name, data.description];
-  db.query(query, values, (err, res) => {
-    if (err) {
-      cb(err);
-    } else {
-      cb(err, res.rows);
-    }
-  });
+  db.query('INSERT INTO public.transaction_type(name, description) VALUES($1, $2) RETURNING *',
+    [data.name, data.description ?? null], (err, result) => cb(err, result?.rows[0]));
 };
 
 exports.editTransactionType = (id, data, cb) => {
-  const query = 'UPDATE transaction_type SET name=$1, description=$2 WHERE id=$3 RETURNING *';
-  const value = [data.name, data.description, id];
-  db.query(query, value, (err, res) => {
-    if (res) {
-      // console.log(res);
-      cb(err, res.rows);
-    } else {
-      cb(err);
-    }
-  });
+  const fields = Object.entries({ name: data.name, description: data.description }).filter(([, value]) => value !== undefined);
+  if (!fields.length) return cb(httpError(400, 'No editable fields supplied'));
+  const assignments = fields.map(([field], index) => `${field}=$${index + 2}`).join(', ');
+  db.query(`UPDATE public.transaction_type SET ${assignments} WHERE id=$1 RETURNING *`,
+    [id, ...fields.map(([, value]) => value)], (err, result) => cb(err, result?.rows[0]));
 };
 
 exports.deleteTransactionType = (id, cb) => {
-  const query = 'DELETE FROM transaction_type WHERE id=$1 RETURNING *';
-  const value = [id];
-  db.query(query, value, (err, res) => {
-    cb(res.rows);
-  });
+  db.query('DELETE FROM public.transaction_type WHERE id=$1 RETURNING *', [id],
+    (err, result) => cb(err, result?.rows[0]));
 };

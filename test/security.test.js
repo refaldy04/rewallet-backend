@@ -376,6 +376,112 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       assert.deepEqual(pages, all.body.result.map(({ id }) => id));
     });
 
+    await t.test('PIN migration CLI validates data, preserves existing hash/lock state and is safe to repeat', async () => {
+      const script = path.join(__dirname, '..', 'scripts', 'migrate-pins.js');
+      const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+      assert.equal(packageJson.scripts['db:migrate:pin'], 'node scripts/migrate-pins.js');
+      const existingHash = await bcrypt.hash('222222', 4);
+      const expiry = new Date(Date.now() + 600000);
+      const newAccounts = await db.query(`INSERT INTO public.users(email, username, password, pin, pin_hash, pin_failed_attempts, pin_locked_until) VALUES
+        ('migrate-valid@example.invalid', 'migrate-valid', $1, '001234', NULL, 3, $3),
+        ('migrate-hashed@example.invalid', 'migrate-hashed', $1, '111111', $2, 4, $3),
+        ('migrate-invalid@example.invalid', 'migrate-invalid', $1, 'x23x56', NULL, 0, NULL)
+        RETURNING id`, [hash, existingHash, expiry]);
+      const ids = newAccounts.rows.map(({ id }) => id);
+      const snapshot = async () => (await db.query('SELECT id, pin, pin_hash, pin_failed_attempts, pin_locked_until FROM public.users ORDER BY id')).rows;
+      const runMigration = () => {
+        const result = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env }, windowsHide: true, encoding: 'utf8', timeout: 30000 });
+        assert.ifError(result.error);
+        const output = result.stdout + result.stderr;
+        for (const secret of ['001234', '111111', 'x23x56', existingHash, process.env.DATABASE_URL]) assert.equal(output.includes(secret), false);
+        return { status: result.status, output };
+      };
+      const before = await snapshot();
+      const invalid = runMigration();
+      assert.equal(invalid.status, 1);
+      assert.match(invalid.output, /Invalid legacy PIN/);
+      assert.deepEqual(await snapshot(), before);
+      await db.query('UPDATE public.users SET pin=NULL WHERE id=$1', [ids[2]]);
+      const invalidHash = 'not-a-valid-bcrypt-hash';
+      await db.query('UPDATE public.users SET pin_hash=$2 WHERE id=$1', [ids[1], invalidHash]);
+      const beforeInvalidHash = await snapshot();
+      const rejectedHash = runMigration();
+      assert.equal(rejectedHash.status, 1);
+      assert.match(rejectedHash.output, /Invalid existing PIN hashes/);
+      assert.equal(rejectedHash.output.includes(invalidHash), false);
+      assert.deepEqual(await snapshot(), beforeInvalidHash);
+      await db.query('UPDATE public.users SET pin_hash=$2 WHERE id=$1', [ids[1], existingHash]);
+      const success = runMigration();
+      assert.equal(success.status, 0, success.output);
+      const accounts = (await db.query('SELECT pin, pin_hash, pin_failed_attempts, pin_locked_until FROM public.users WHERE id=ANY($1) ORDER BY id', [ids])).rows;
+      assert.equal(accounts[0].pin, null);
+      assert.equal(await bcrypt.compare('001234', accounts[0].pin_hash), true);
+      assert.equal(bcrypt.getRounds(accounts[0].pin_hash), 12);
+      assert.equal(accounts[0].pin_failed_attempts, 3);
+      assert.equal(accounts[0].pin_locked_until.toISOString(), expiry.toISOString());
+      assert.equal(accounts[1].pin, null);
+      assert.equal(accounts[1].pin_hash, existingHash);
+      assert.equal(accounts[1].pin_failed_attempts, 4);
+      assert.equal(accounts[1].pin_locked_until.toISOString(), expiry.toISOString());
+      assert.equal(accounts[2].pin_hash, null);
+      const after = await snapshot();
+      const repeated = runMigration();
+      assert.equal(repeated.status, 0);
+      assert.match(repeated.output, /0 hashed, 0 plaintext values cleared/);
+      assert.deepEqual(await snapshot(), after);
+    });
+
+    await t.test('PIN migration resumes committed accounts after a database failure without leaking details', async () => {
+      const script = path.join(__dirname, '..', 'scripts', 'migrate-pins.js');
+      const accounts = await db.query(`INSERT INTO public.users(email, username, password, pin) VALUES
+        ('resume-first@example.invalid', 'resume-first', $1, '314159'),
+        ('resume-second@example.invalid', 'resume-second', $1, '271828') RETURNING id`, [hash]);
+      const [first, second] = accounts.rows.map(({ id }) => id);
+      // IDs are generated integer values in this disposable database only.
+      await db.query(`CREATE FUNCTION public.test_fail_pin_migration() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.id = ${second} THEN RAISE EXCEPTION 'Synthetic failure containing 271828'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER test_fail_pin_migration BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.test_fail_pin_migration();`);
+      let failed;
+      try {
+        failed = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env }, windowsHide: true, encoding: 'utf8', timeout: 30000 });
+      } finally {
+        await db.query('DROP TRIGGER test_fail_pin_migration ON public.users; DROP FUNCTION public.test_fail_pin_migration()');
+      }
+      assert.ifError(failed.error);
+      assert.equal(failed.status, 1);
+      assert.equal((failed.stdout + failed.stderr).includes('271828'), false);
+      const partial = (await db.query('SELECT pin, pin_hash FROM public.users WHERE id=ANY($1) ORDER BY id', [[first, second]])).rows;
+      assert.equal(partial[0].pin, null);
+      assert.equal(await bcrypt.compare('314159', partial[0].pin_hash), true);
+      assert.equal(partial[1].pin, '271828');
+      assert.equal(partial[1].pin_hash, null);
+      const resumed = spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env }, windowsHide: true, encoding: 'utf8', timeout: 30000 });
+      assert.ifError(resumed.error);
+      assert.equal(resumed.status, 0, resumed.stdout + resumed.stderr);
+      const complete = (await db.query('SELECT pin, pin_hash FROM public.users WHERE id=ANY($1) ORDER BY id', [[first, second]])).rows;
+      assert.equal(complete[0].pin_hash, partial[0].pin_hash);
+      assert.equal(complete[1].pin, null);
+      assert.equal(await bcrypt.compare('271828', complete[1].pin_hash), true);
+    });
+
+    await t.test('PIN migration refuses overlapping runs and does not connect using an implicit database', async () => {
+      const { migratePins } = require('../scripts/migrate-pins');
+      const lockOwner = await db.connect();
+      try {
+        await lockOwner.query('SELECT pg_advisory_lock(48009, 2)');
+        await assert.rejects(migratePins(db), /Another PIN migration is running/);
+      } finally {
+        await lockOwner.query('SELECT pg_advisory_unlock(48009, 2)');
+        lockOwner.release();
+      }
+      const env = { ...process.env };
+      delete env.DATABASE_URL;
+      const result = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'migrate-pins.js')], { cwd: root, env, windowsHide: true, encoding: 'utf8', timeout: 10000 });
+      assert.ifError(result.error);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /DATABASE_URL must be configured/);
+    });
+
     await t.test('credentials never appear in application logs', () => {
       for (const secret of secrets) assert.equal(applicationLogs.join('\n').includes(secret), false);
     });

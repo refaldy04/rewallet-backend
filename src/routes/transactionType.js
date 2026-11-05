@@ -1,10 +1,11 @@
 const transactionsType = require('express').Router();
 const transactionsTypeController = require('../controllers/transactionType');
+const { asyncHandler } = require('../helpers/security');
 
-transactionsType.get('/transactionType', transactionsTypeController.getAllTransactionType);
-transactionsType.get('/transactionType/:id', transactionsTypeController.getTransactionTypeById);
-transactionsType.post('/transactionType', transactionsTypeController.createTransactionType);
-transactionsType.patch('/transactionType/:id', transactionsTypeController.editTransactionType);
-transactionsType.delete('/transactionType/:id', transactionsTypeController.deleteTransactionType);
+transactionsType.get('/transactionType', asyncHandler(transactionsTypeController.getAllTransactionType));
+transactionsType.get('/transactionType/:id', asyncHandler(transactionsTypeController.getTransactionTypeById));
+transactionsType.post('/transactionType', asyncHandler(transactionsTypeController.createTransactionType));
+transactionsType.patch('/transactionType/:id', asyncHandler(transactionsTypeController.editTransactionType));
+transactionsType.delete('/transactionType/:id', asyncHandler(transactionsTypeController.deleteTransactionType));
 
 module.exports = transactionsType;

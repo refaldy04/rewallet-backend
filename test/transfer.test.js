@@ -123,6 +123,112 @@ test('atomic transfers against disposable PostgreSQL and real HTTP routes', { sk
     }
     t.beforeEach(() => reset());
 
+    async function asAdmin(work) {
+      const saved = process.env.ADMIN_USER_IDS;
+      process.env.ADMIN_USER_IDS = '1';
+      const adminRequest = async (route, method = 'GET', body) => {
+        const res = await fetch(`${base}/admin${route}`, { method,
+          headers: { Authorization: `Bearer ${tokens[1]}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+          body: body === undefined ? undefined : JSON.stringify(body) });
+        return { status: res.status, body: await res.json(), headers: res.headers };
+      };
+      try { await work(adminRequest); }
+      finally {
+        if (saved === undefined) delete process.env.ADMIN_USER_IDS;
+        else process.env.ADMIN_USER_IDS = saved;
+      }
+    }
+
+    await t.test('admin transactions are read-only and cannot corrupt a settled receipt or its retry', async () => {
+      const initial = await request();
+      assert.equal(initial.status, 200);
+      const transaction = initial.body.result;
+      const before = await snapshot();
+      await asAdmin(async (admin) => {
+        assert.equal((await admin('/transaction')).status, 200);
+        assert.equal((await admin(`/transaction/${transaction.id}`)).body.result.amount, '100');
+        const changes = { amount: '900', recipient_id: 3, sender_id: 1, type_id: transaction.type_id, time: new Date().toISOString() };
+        for (const [route, method] of [['/transaction', 'POST'], [`/transaction/${transaction.id}`, 'PATCH'], [`/transaction/${transaction.id}`, 'DELETE'], [`/transaction/${transaction.id}`, 'PUT']]) {
+          const result = await admin(route, method, changes);
+          assert.equal(result.status, 405);
+          assert.equal(result.headers.get('Allow'), 'GET, HEAD');
+        }
+      });
+      assert.deepEqual(await snapshot(), before);
+      assert.deepEqual((await request()).body.result, transaction);
+      await assertConsistent(1);
+    });
+
+    await t.test('admin reads reject invalid IDs, return JSON 404 and keep the server alive', async () => {
+      await asAdmin(async (admin) => {
+        for (const resource of ['transaction', 'transactionType']) {
+          for (const id of ['not-an-integer', '-1', '1.5', '2147483648']) {
+            assert.equal((await admin(`/${resource}/${id}`)).status, 400);
+          }
+          const missing = await admin(`/${resource}/2147483647`);
+          assert.equal(missing.status, 404);
+          assert.equal(missing.body.success, false);
+        }
+        assert.equal((await admin('/transaction')).status, 200);
+        assert.equal((await admin('/transactionType')).status, 200);
+      });
+      assert.equal((await fetch(base)).status, 200);
+    });
+
+    await t.test('transaction type CRUD handles not-found and foreign-key errors without crashing', async () => {
+      const before = await snapshot();
+      await asAdmin(async (admin) => {
+        const referencedId = (await db.query("SELECT id FROM public.transaction_type WHERE code='OPENING_BALANCE'")).rows[0].id;
+        assert.equal((await admin(`/transactionType/${referencedId}`, 'DELETE')).status, 409);
+        assert.equal((await admin('/transactionType/2147483647', 'DELETE')).status, 404);
+        assert.equal((await admin('/transactionType/2147483647', 'PATCH', { name: 'Missing' })).status, 404);
+        assert.equal((await admin('/transactionType/not-an-integer', 'DELETE')).status, 400);
+        assert.equal((await admin('/transactionType', 'POST', {})).status, 400);
+        const created = await admin('/transactionType', 'POST', { name: 'Test metadata', description: 'Temporary' });
+        assert.equal(created.status, 201);
+        const id = created.body.result.id;
+        const updated = await admin(`/transactionType/${id}`, 'PATCH', { description: null });
+        assert.equal(updated.status, 200);
+        assert.equal(updated.body.result.name, 'Test metadata');
+        assert.equal(updated.body.result.description, null);
+        assert.equal((await admin(`/transactionType/${id}`, 'PATCH', { code: 'TRANSFER' })).status, 400);
+        assert.equal((await admin(`/transactionType/${id}`, 'DELETE')).status, 200);
+        assert.equal((await admin(`/transactionType/${id}`)).status, 404);
+        assert.equal((await admin('/transaction')).status, 200);
+      });
+      assert.deepEqual(await snapshot(), before);
+    });
+
+    await t.test('database failures on every admin transaction/type read and type write reach the error middleware', async (t) => {
+      await asAdmin(async (admin) => {
+        const query = db.query;
+        const details = 'synthetic-database-detail-that-must-not-leak';
+        for (const [route, method, body, pattern] of [
+          ['/transaction', 'GET', undefined, /^SELECT \* FROM public\.transaction ORDER/],
+          ['/transaction/1', 'GET', undefined, /^SELECT \* FROM public\.transaction WHERE/],
+          ['/transactionType', 'GET', undefined, /^SELECT \* FROM public\.transaction_type ORDER/],
+          ['/transactionType/1', 'GET', undefined, /^SELECT \* FROM public\.transaction_type WHERE/],
+          ['/transactionType', 'POST', { name: 'Valid' }, /^INSERT INTO public\.transaction_type/],
+          ['/transactionType/1', 'PATCH', { name: 'Valid' }, /^UPDATE public\.transaction_type/],
+          ['/transactionType/1', 'DELETE', undefined, /^DELETE FROM public\.transaction_type/],
+        ]) {
+          const mock = t.mock.method(db, 'query', function (...args) {
+            const callback = args.at(-1);
+            if (typeof args[0] === 'string' && pattern.test(args[0]) && typeof callback === 'function') {
+              return queueMicrotask(() => callback(Object.assign(new Error(details), { code: 'XX000', detail: details })));
+            }
+            return query.apply(this, args);
+          });
+          try {
+            const result = await admin(route, method, body);
+            assert.equal(result.status, 500);
+            assert.equal(JSON.stringify(result.body).includes(details), false);
+          } finally { mock.mock.restore(); }
+          assert.equal((await admin('/transaction')).status, 200);
+        }
+      });
+    });
+
     await t.test('validates authentication, PIN format, recipients, whole rupiah and keys without financial writes', async () => {
       const before = await snapshot();
       assert.equal((await request({}, { sender: null })).status, 401);

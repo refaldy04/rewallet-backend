@@ -126,6 +126,15 @@ be retried. Wrong PIN attempts still persist and share the existing lockout.
   two users. No configured IDs means all admin access is denied. The schema has
   no application role column; request fields and JWT role claims cannot grant
   admin access. Every `/admin` router requires authentication and this check.
+- `/admin/transaction` and `/admin/transaction/:id` are read-only (`GET`/`HEAD`).
+  Creating, editing or deleting financial records returns HTTP 405, including for
+  administrators. Transfers and future payment credits must update the transaction,
+  wallet and ledger together through their wallet service. Corrections require
+  a separate compensating financial workflow; generic admin CRUD cannot do that.
+- Admin transaction/type IDs are validated before database queries. Missing
+  records return JSON HTTP 404, and deleting a transaction type still referenced
+  by transactions returns HTTP 409. Database failures use the error middleware
+  without returning database details or terminating the HTTP process.
 - `PATCH /profile` accepts only `fullname`, `phone_number` and a multipart
   `picture` upload. Other fields are rejected. Updates use exactly
   `profile.user_id = authenticated_user_id`; admin updates by profile ID use
@@ -168,10 +177,15 @@ npm run db:migrate:pin
 ```
 
 This command uses `DATABASE_URL` from the environment or `.env`, hashes existing
-six-digit PINs with bcrypt and erases their plaintext values. It is resumable
-and safe to repeat. Existing hash/counter/lock state is preserved. Invalid
-legacy PINs stop the migration for review and account recovery; they are never
-printed. A successful legacy PIN verification also upgrades that account if
+six-digit PINs with bcrypt (cost 12) and erases their plaintext values. It validates
+legacy PINs and existing bcrypt hashes before any account is changed, prevents
+overlapping migration runs, and commits each account independently so interrupted
+runs can resume. Repeating a completed run does not rehash accounts. Existing
+hash/counter/lock state is preserved; a valid existing hash takes precedence over
+any remaining plaintext PIN. Invalid data stops the migration for review and
+account recovery; credentials and raw database errors are never printed. A
+missing `DATABASE_URL` stops the command instead of selecting a default database.
+A successful legacy PIN verification also upgrades that account if
 migration has not yet run. Deployment does not automatically run this command.
 
 1. Install Postman and open it

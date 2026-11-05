@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "db:migrate:pin": "node scripts/migrate-pins.js",
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
