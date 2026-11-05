@@ -210,7 +210,7 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
     });
 
     await t.test('simultaneous failed guesses share a persistent lock across PIN endpoints', async () => {
-      const attempts = await Promise.all(Array.from({ length: 12 }, (_, i) => request(i % 3 === 0 ? '/checkPin' : i % 3 === 1 ? '/changePin' : '/transfer', { method: i % 3 === 1 ? 'PATCH' : 'POST', token: member, body: { pin: '999999', newpin: '111111' } })));
+      const attempts = await Promise.all(Array.from({ length: 12 }, (_, i) => request(i % 3 === 0 ? '/checkPin' : i % 3 === 1 ? '/changePin' : '/transfer', { method: i % 3 === 1 ? 'PATCH' : 'POST', token: member, body: { pin: '999999', newpin: '111111', recipient_id: 3, amount: 1, idempotency_key: `pin-attempt-${i}` } })));
       assert.equal(attempts.filter((res) => res.status === 400).length, 4, JSON.stringify(attempts.map(({ status, body }) => ({ status, body }))));
       assert.equal(attempts.filter((res) => res.status === 429).length, 8);
       const locked = (await db.query('SELECT pin_failed_attempts, pin_locked_until FROM public.users WHERE id=2')).rows[0];
@@ -309,9 +309,9 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
       assert.deepEqual(account.rows, [{ user_id: result.body.result.id, balance: '0', currency: 'IDR' }]);
     });
 
-    await t.test('legacy financial endpoints cannot credit arbitrary balances or write transactions', async () => {
+    await t.test('unverified top ups and transfers without idempotency cannot write transactions', async () => {
       assert.equal((await request('/topup', { method: 'POST', token: member, body: { recipient_id: 3, amount: 10000 } })).status, 503);
-      assert.equal((await request('/transfer', { method: 'POST', token: member, body: { pin: '009876', recipient_id: 3, amount: 10000 } })).status, 503);
+      assert.equal((await request('/transfer', { method: 'POST', token: member, body: { pin: '009876', recipient_id: 3, amount: 10000 } })).status, 400);
       assert.equal((await db.query('SELECT count(*)::integer AS count FROM public.transaction')).rows[0].count, 0);
       const res = await request('/profile', { token: member });
       assert.equal(res.body.result.user_id, 2);

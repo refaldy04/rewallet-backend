@@ -37,9 +37,9 @@ npm start
 
 Configure the database, JWT secret and Cloudinary environment variables
 before using the corresponding endpoints. The local server listens on port 3334.
-Run `npm test` for the Cloudinary adapter, wallet reads/registration and security
-regression checks.
-Security integration tests start a disposable local PostgreSQL cluster when
+Run `npm test` for the Cloudinary adapter, wallet reads/registration, atomic
+transfers and security regression checks.
+Integration tests start a disposable local PostgreSQL cluster when
 `initdb` and `pg_ctl` are on PATH, and otherwise report a skip. They use the
 application table definitions from `schema.sql`, synthetic data and real HTTP
 requests; they never connect to the application's database. Cloudinary tests
@@ -80,6 +80,41 @@ legacy rows with no `created_at` follow in descending `time` order. IDs break
 timestamp ties. The legacy timestamp remains available without assigning it an
 assumed historical timezone.
 
+`POST /transfer` (also `/auth/transfer`) requires a Bearer token, a six-digit
+string `pin`, the recipient's **user ID** in `recipient_id`, and a positive
+whole-rupiah `amount`. Use a decimal string for amounts above JavaScript's safe
+integer range; the maximum is `9223372036854775807`. Optional `notes` must be a
+string or null, and optional `currency` must be `IDR`. The sender, transaction
+type, success status and timestamps are assigned by the server.
+
+Send a new `Idempotency-Key` header for each intended transfer (1–128 visible
+ASCII characters without spaces). Form clients may instead send
+`idempotency_key` in the body. If both are supplied, they must match. For example:
+
+```http
+POST /transfer
+Authorization: Bearer <token>
+Idempotency-Key: 4b57b6fa-08cb-4298-9122-4146201407aa
+Content-Type: application/json
+
+{"pin":"001234","recipient_id":2,"amount":"10000","notes":"Lunch"}
+```
+
+Keep the same key and business payload when retrying, including after a timeout.
+Both the initial success and a successful retry return HTTP 200 with the same
+transaction in `result`; no balances or ledger entries are applied twice. Keys
+are scoped to the authenticated sender. Reusing a key with a different recipient,
+amount or notes returns HTTP 409. Equivalent integer strings/numbers, omitted or
+null notes, and omitted or explicit `IDR` currency are normalized before hashing.
+Every retry still requires the current valid PIN.
+
+Transfers check both IDR wallets and available funds under ordered row locks.
+The transaction, debit, credit and two ledger entries commit together on one
+connection. Insufficient funds, an unavailable sender wallet or a recipient
+balance overflow return HTTP 409; a missing recipient wallet returns HTTP 404.
+Rejected transfers leave no financial records, so an uncommitted request can
+be retried. Wrong PIN attempts still persist and share the existing lockout.
+
 ### Security configuration and API changes
 
 - `APP_SECRET` is mandatory; the server refuses to start without it. Use a
@@ -111,10 +146,9 @@ assumed historical timezone.
   15 minutes (HTTP 429 with `Retry-After`). `/checkPin`, `/changePin` and the
   transfer PIN check share persistent counters and a database row lock.
   `/changePin` requires both `pin` and `newpin` as six-digit strings.
-- Legacy `/topup` and `/transfer` financial writes return HTTP 503 while the
-  atomic wallet/payment service remains unimplemented, as required by
-  [the wallet migration prerequisites](migrations/README.md). The old top up
-  endpoint accepted arbitrary credits without payment verification.
+- `/transfer` uses the migrated wallet tables and requires wallet cutover 003.
+  `/topup` remains HTTP 503 until payment verification is implemented. The old
+  top up endpoint accepted arbitrary credits without payment verification.
 
 The same auth endpoints remain mounted both under `/auth` and at the root.
 Reauthentication follows the

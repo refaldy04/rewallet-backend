@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const users = require('../models/users');
 const profiles = require('../models/profile');
 const transactions = require('../models/transactions');
+const transfer = require('../services/transfer');
 const pin = require('../helpers/pin');
 const response = require('../helpers/standardResponse');
 const { jwtSecret, credentialVersion, safeUser, validationErrors, httpError } = require('../helpers/security');
@@ -102,11 +103,10 @@ exports.addPhoneNumber = exports.changePhoneNumber;
 
 exports.checkEmail = (req, res) => response(res, 'If the account exists, use the supported sign-in or recovery process');
 
-// Legacy financial writes are non-atomic and accept unverified top ups. Keep them
-// disabled as required by migrations/README.md until the wallet service is ready.
 exports.transfer = async (req, res) => {
   if (!validate(req, res)) return;
-  await pin.verify(req.authUser.id, req.body.pin);
-  return response(res, 'Transfers are temporarily unavailable', null, null, 503);
+  const transaction = await transfer(req.authUser.id, req.body, req.get('Idempotency-Key'));
+  return response(res, 'Transfer successful', transaction);
 };
+// Top ups require verified payment confirmation before any wallet credit.
 exports.topup = (req, res) => response(res, 'Top ups are temporarily unavailable', null, null, 503);
