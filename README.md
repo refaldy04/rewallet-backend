@@ -38,7 +38,7 @@ npm start
 Configure the database, JWT secret and Cloudinary environment variables
 before using the corresponding endpoints. The local server listens on port 3334.
 Run `npm test` for the Cloudinary adapter, wallet reads/registration, atomic
-transfers and security regression checks.
+transfers, Xendit top ups and security regression checks.
 Integration tests start a disposable local PostgreSQL cluster when
 `initdb` and `pg_ctl` are on PATH, and otherwise report a skip. They use the
 application table definitions from `schema.sql`, synthetic data and real HTTP
@@ -128,7 +128,7 @@ be retried. Wrong PIN attempts still persist and share the existing lockout.
   admin access. Every `/admin` router requires authentication and this check.
 - `/admin/transaction` and `/admin/transaction/:id` are read-only (`GET`/`HEAD`).
   Creating, editing or deleting financial records returns HTTP 405, including for
-  administrators. Transfers and future payment credits must update the transaction,
+  administrators. Transfers and payment credits must update the transaction,
   wallet and ledger together through their wallet service. Corrections require
   a separate compensating financial workflow; generic admin CRUD cannot do that.
 - Admin transaction/type IDs are validated before database queries. Missing
@@ -155,13 +155,146 @@ be retried. Wrong PIN attempts still persist and share the existing lockout.
   15 minutes (HTTP 429 with `Retry-After`). `/checkPin`, `/changePin` and the
   transfer PIN check share persistent counters and a database row lock.
   `/changePin` requires both `pin` and `newpin` as six-digit strings.
-- `/transfer` uses the migrated wallet tables and requires wallet cutover 003.
-  `/topup` remains HTTP 503 until payment verification is implemented. The old
-  top up endpoint accepted arbitrary credits without payment verification.
+- `/transfer` and `/topup` use the migrated wallet tables and require wallet cutover
+  003. `/topup` remains HTTP 503 until Xendit is explicitly enabled and configured.
+  Credits require verified full payment capture, never a client-supplied status.
 
 The same auth endpoints remain mounted both under `/auth` and at the root.
 Reauthentication follows the
 [OWASP authentication guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
+
+### Xendit Payment Requests v3
+
+The backend uses `POST https://api.xendit.co/v3/payment_requests`, Basic auth with
+the server secret key and `api-version: 2024-11-11`. Each top up is a single-use
+`PAY` request with automatic capture in `ID`/`IDR`. Internal user-to-user transfers
+continue to use the local wallet service.
+
+No new migration is required if migrations 002 and 003 have already run and the
+current `schema.sql` matches your database. The integration uses `payment_requests`,
+`payment_webhook_events`, `wallets`, `transaction`, `transaction_type` and
+`wallet_entries`; it requires the canonical `TOPUP` transaction type from 002.
+Do not rerun cutover to enable Xendit.
+
+Start in **Xendit test mode**. Copy the settings from
+[config/xendit.env.example](config/xendit.env.example) into the backend environment:
+
+- `XENDIT_ENABLED=true` explicitly enables the integration. Leave it false until
+  the other settings are ready. It also gates webhook handling and reconciliation.
+- `XENDIT_SECRET_KEY`, `XENDIT_WEBHOOK_TOKEN` and `XENDIT_BUSINESS_ID` must all belong
+  to the same account and mode. Keep them on the backend. Use the callback
+  verification token from Xendit webhook settings, not the API secret.
+- `XENDIT_ENABLED_CHANNELS` is an explicit comma-separated allowlist. Currently
+  supported: `DANA,SHOPEEPAY,QRIS`. Enable only channels activated in your Xendit
+  account/mode. Banks, cards, reusable codes, OTP and saved payment methods need
+  their own channel requirements and are not enabled by this implementation.
+- `XENDIT_SUCCESS_RETURN_URL` and `XENDIT_FAILURE_RETURN_URL` point to frontend
+  pages. The backend appends `topup_id=<local UUID>` to each redirect URL. HTTPS is
+  required, except HTTP localhost during development. Request bodies cannot
+  override these URLs. QRIS does not require return URLs.
+- `TOPUP_MIN_AMOUNT=10000` and `TOPUP_MAX_AMOUNT=10000000` are application limits
+  in whole rupiah. Each channel also applies its own range: DANA 100–20,000,000,
+  ShopeePay 1–20,000,000, QRIS 1–10,000,000. The catalogue exposes the intersection.
+  Check account-specific limits before enabling a live channel.
+
+Configure Xendit's **Payments v3** webhook URL to
+`https://<backend-host>/webhooks/xendit/payments` for `payment.capture`,
+`payment.authorization` and `payment.failure`. This route uses `x-callback-token`
+authentication instead of a user JWT and verifies the Xendit business ID.
+
+| Endpoint | Authentication | Purpose |
+| --- | --- | --- |
+| `GET /topup/methods` | Bearer token | App-configured channel catalogue and limits |
+| `POST /topup` | Bearer token + `Idempotency-Key` | Create or replay a top up |
+| `GET /topups/:id` | Owner's Bearer token | Read the local payment status |
+| `POST /topups/:id/refresh` | Owner's Bearer token | Query Xendit and reconcile capture evidence |
+| `POST /webhooks/xendit/payments` | Xendit callback token | Persist and process payment events |
+
+User endpoints also work under `/auth`. This catalogue comes from backend
+configuration; it does not call a Xendit endpoint to discover activated channels.
+All payment amounts in responses are decimal strings.
+
+```http
+POST /topup
+Authorization: Bearer <token>
+Idempotency-Key: 6cad81df-79db-405c-b137-22da79a0057d
+Content-Type: application/json
+
+{"amount":"25000","channel_code":"DANA"}
+```
+
+Only `amount`, `channel_code`, optional `currency: "IDR"` and optional
+`idempotency_key` are accepted. The key can be sent in the header or body; if both
+are present, they must match. Reusing a key with different normalized business
+data returns HTTP 409. Keys are scoped to the authenticated user. A fresh request
+normally returns HTTP 201 and a replay HTTP 200. `CREATED`/`UNKNOWN` returns HTTP
+202 with the durable payment ID; keep the same key after a timeout.
+
+The frontend flow is:
+
+1. Load `/topup/methods`, choose a channel and submit `/topup` with a new key for
+   that intended top up. Persist the key and returned `result.id` across retries.
+2. Use `result.actions` from Xendit. A `REDIRECT_CUSTOMER` action with `WEB_URL`
+   opens a payment page; `DEEPLINK_URL` opens the appropriate wallet app. A
+   `PRESENT_TO_CUSTOMER`/`QR_STRING` action must be rendered as a QR code. Do not
+   assume every channel has a redirect URL. Do not render action values as HTML.
+3. On the frontend return page, load `/topups/<topup_id>`. Poll this local endpoint
+   with backoff while processing; use `/refresh` for a deliberate reconciliation,
+   not every poll. URL parameters or a success return page do not authorize credit.
+4. Show a successful top up only when the backend returns `status: "SUCCEEDED"`
+   and `transaction_id`. Failed/expired payments have no actionable payment links.
+
+Request creation and status-only responses never increase balance. A verified
+`payment.capture` or authenticated Xendit payment lookup must match the local
+reference, provider request ID, business, channel, `PAY` type, automatic capture,
+country, currency and exact amount. Only a single full capture is supported.
+The service locks the payment and wallet, then commits the successful transaction,
+one credit ledger entry, wallet balance and payment linkage together. Duplicate
+events are safe, including concurrent delivery, early webhooks and lost commit
+acknowledgements. Late failure/pending responses cannot undo a successful credit.
+Conflicting captures remain in the private failed inbox for operator review.
+
+The callback is persisted before processing, and processing completes before the
+HTTP response. A processing failure returns HTTP 503 so Xendit can retry; it also
+leaves a durable inbox entry. No unawaited work is required after a Vercel response.
+Monitor failed inbox entries and run the bounded reconciliation command from an
+external scheduler/worker (for example, every minute) with the same backend
+environment; deployment does not schedule it automatically:
+
+```sh
+npm run payments:reconcile
+npm run payments:reconcile -- --topup-id <local-UUID>
+```
+
+The batch replays up to 20 received/failed events and refreshes up to 20 unfinished
+payments sequentially. It prints counts, never payloads or credentials. A nonzero
+exit code means failed work or unknown requests need review. Repeated runs are
+safe; concurrent workers are serialized by database row locks for financial writes.
+
+Xendit v3 creation does not document a universal idempotency header or guarantee
+unique `reference_id` for these channels. Consequently the backend reserves a
+local request once and **never retries its provider POST**, even after a timeout
+or process crash. A stale `CREATED` request becomes `UNKNOWN` during reconciliation.
+If no provider ID was received, a late webhook can recover it by reference. If
+that webhook is also missing, find the matching request in the Xendit dashboard
+using the local `reference_id`, then run:
+
+```sh
+npm run payments:reconcile -- --topup-id <local-UUID> --payment-request-id <Xendit-pr-ID>
+```
+
+This operator-only command fetches and validates the provider record before
+binding it. It cannot create payments or arbitrarily mark them paid. Do not
+automatically create a new top up with a new key while the first outcome is
+unknown. Partial/multiple captures, refunds and chargebacks need a separate
+compensating wallet workflow; never edit a settled transaction or ledger entry.
+
+Automated tests use a mocked Xendit adapter and disposable PostgreSQL, never live
+Xendit/Supabase. Before production, exercise a real test-mode redirect/QR payment,
+callback delivery and frontend return, then configure live credentials and channels
+separately. References: [create request](https://docs.xendit.co/apidocs/create-payment-request),
+[payment webhooks](https://docs.xendit.co/apidocs/payment-webhook-notification),
+[payment lookup](https://docs.xendit.co/apidocs/get-payment).
 
 ### Existing PIN migration
 

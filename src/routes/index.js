@@ -1,6 +1,9 @@
 const router = require('express').Router();
 const auth = require('../middleware/auth');
 const admin = require('../middleware/admin');
+const { asyncHandler } = require('../helpers/security');
+
+router.post('/webhooks/xendit/payments', asyncHandler(require('../controllers/topup').webhook));
 
 router.use('/admin', auth, admin);
 router.use('/admin', require('./users'));

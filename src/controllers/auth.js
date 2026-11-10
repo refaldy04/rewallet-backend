@@ -109,4 +109,3 @@ exports.transfer = async (req, res) => {
   return response(res, 'Transfer successful', transaction);
 };
 // Top ups require verified payment confirmation before any wallet credit.
-exports.topup = (req, res) => response(res, 'Top ups are temporarily unavailable', null, null, 503);

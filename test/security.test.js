@@ -48,6 +48,7 @@ test('security regressions against disposable PostgreSQL and real HTTP routes', 
     process.env.DATABASE_URL = `postgresql://security_test@127.0.0.1:${port}/postgres`;
     process.env.APP_SECRET = 'synthetic-security-test-secret-never-used-in-production';
     process.env.ADMIN_USER_IDS = '1';
+    process.env.XENDIT_ENABLED = 'false';
     db = require('../src/helpers/db');
 
     // Extract the actual application table definitions from the requested reference.

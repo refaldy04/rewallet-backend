@@ -1,6 +1,7 @@
 const auth = require('express').Router();
 const controller = require('../controllers/auth');
 const profiles = require('../controllers/profile');
+const topup = require('../controllers/topup');
 const { body } = require('express-validator');
 const authenticated = require('../middleware/auth');
 const { asyncHandler } = require('../helpers/security');
@@ -24,7 +25,10 @@ auth.patch('/resetPassword/:id', authenticated, ...changePassword, asyncHandler(
 auth.patch('/phone', authenticated, phone, asyncHandler(controller.changePhoneNumber));
 auth.post('/phone', authenticated, phone, asyncHandler(controller.addPhoneNumber));
 auth.post('/transfer', authenticated, pin('pin'), asyncHandler(controller.transfer));
-auth.post('/topup', authenticated, controller.topup);
+auth.get('/topup/methods', authenticated, asyncHandler(topup.methods));
+auth.post('/topup', authenticated, asyncHandler(topup.create));
+auth.get('/topups/:id', authenticated, asyncHandler(topup.get));
+auth.post('/topups/:id/refresh', authenticated, asyncHandler(topup.refresh));
 auth.post('/checkEmail', controller.checkEmail);
 
 module.exports = auth;
